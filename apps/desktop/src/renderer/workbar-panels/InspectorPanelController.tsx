@@ -14,6 +14,17 @@ import { invokeWorkbarRuntime, workbarErrorMessage } from "./workbar-runtime.js"
 import { numberField, recordField, stringField } from "./workbar-values.js";
 import { readExecutionWindow, mergeExecutionPages } from "./execution-trace-window.js";
 
+/** 空追踪列表的稳定引用：控制器每次渲染都传入新数组会击穿面板的浅比较。 */
+const EMPTY_TRACE: readonly InspectorTraceItem[] = [];
+
+/**
+ * 后台刷新拿到的快照与当前可见数据一致时保持原引用，让 React 直接跳过提交。
+ * 载荷是单页执行窗口（≤48KB）或用量摘要，序列化成本远低于重渲整棵时间线。
+ */
+function sameSnapshot(left: unknown, right: unknown): boolean {
+  return left === right || JSON.stringify(left) === JSON.stringify(right);
+}
+
 export function InspectorPanelController({
   workspacePath,
   sessionId,
@@ -44,52 +55,60 @@ export function InspectorPanelController({
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
 
-  const refreshSummary = useCallback(async () => {
-    if (!enabled.current) return;
-    const epoch = generation.current;
-    const request = ++summaryRequest.current;
-    const current = () =>
-      enabled.current &&
-      scopeRef.current === scope &&
-      epoch === generation.current &&
-      request === summaryRequest.current;
-    setSummaryLoading(true);
-    try {
-      const result = await invokeWorkbarRuntime(runtime, "session.execution.summary", scope);
-      if (!current()) return;
-      setSummary(result);
-      setSummaryError(undefined);
-    } catch (cause) {
-      if (current()) setSummaryError(workbarErrorMessage(cause));
-    } finally {
-      if (current()) setSummaryLoading(false);
-    }
-  }, [runtime, scope]);
+  const refreshSummary = useCallback(
+    async (background = false) => {
+      if (!enabled.current) return;
+      const epoch = generation.current;
+      const request = ++summaryRequest.current;
+      const current = () =>
+        enabled.current &&
+        scopeRef.current === scope &&
+        epoch === generation.current &&
+        request === summaryRequest.current;
+      if (!background) setSummaryLoading(true);
+      try {
+        const result = await invokeWorkbarRuntime(runtime, "session.execution.summary", scope);
+        if (!current()) return;
+        // 流式水位的推进不保证用量快照变化；同一个快照不换引用，避免整棵面板重渲。
+        setSummary((previous) => (sameSnapshot(previous, result) ? previous : result));
+        setSummaryError(undefined);
+      } catch (cause) {
+        if (current()) setSummaryError(workbarErrorMessage(cause));
+      } finally {
+        if (current()) setSummaryLoading(false);
+      }
+    },
+    [runtime, scope],
+  );
 
-  const refreshContext = useCallback(async () => {
-    if (!enabled.current) return;
-    const epoch = generation.current;
-    const request = ++contextRequest.current;
-    const current = () =>
-      enabled.current &&
-      scopeRef.current === scope &&
-      epoch === generation.current &&
-      request === contextRequest.current;
-    setContextLoading(true);
-    try {
-      const result = await invokeWorkbarRuntime(runtime, "session.context.get", scope);
-      if (!current()) return;
-      setContext(contextView(result.context));
-      setContextError(undefined);
-    } catch (cause) {
-      if (current()) setContextError(workbarErrorMessage(cause));
-    } finally {
-      if (current()) setContextLoading(false);
-    }
-  }, [runtime, scope]);
+  const refreshContext = useCallback(
+    async (background = false) => {
+      if (!enabled.current) return;
+      const epoch = generation.current;
+      const request = ++contextRequest.current;
+      const current = () =>
+        enabled.current &&
+        scopeRef.current === scope &&
+        epoch === generation.current &&
+        request === contextRequest.current;
+      if (!background) setContextLoading(true);
+      try {
+        const result = await invokeWorkbarRuntime(runtime, "session.context.get", scope);
+        if (!current()) return;
+        const next = contextView(result.context);
+        setContext((previous) => (sameSnapshot(previous, next) ? previous : next));
+        setContextError(undefined);
+      } catch (cause) {
+        if (current()) setContextError(workbarErrorMessage(cause));
+      } finally {
+        if (current()) setContextLoading(false);
+      }
+    },
+    [runtime, scope],
+  );
 
   const refreshTrace = useCallback(
-    async (more = false) => {
+    async (more = false, background = false) => {
       if (!enabled.current) return;
       const epoch = generation.current;
       const request = ++traceRequest.current;
@@ -98,9 +117,12 @@ export function InspectorPanelController({
         scopeRef.current === scope &&
         epoch === generation.current &&
         request === traceRequest.current;
-      setLoading(true);
-      setLoadingEarlier(more);
-      setError(undefined);
+      // 后台刷新由追踪资源水位驱动，高频且大多数帧没有新的执行步骤：
+      // 不切换加载态、不闪错误提示，只在可见数据真的变化时提交。
+      if (!background) {
+        setLoading(true);
+        setLoadingEarlier(more);
+      }
       try {
         // Re-read from the newest page with fresh cursors: new runs may shift every page.
         const handshake = await invokeWorkbarRuntime(runtime, "runtime.ping", {}).catch(
@@ -119,7 +141,9 @@ export function InspectorPanelController({
         );
         if (!current() || !result) return;
         pageCount.current = result.length;
-        setPages(result);
+        setPages((previous) => (sameSnapshot(previous, result) ? previous : result));
+        // 与当前值相同时 React 直接跳过，成功刷新必然清掉旧错误。
+        setError(undefined);
       } catch (cause) {
         if (current()) setError(workbarErrorMessage(cause));
       } finally {
@@ -155,15 +179,19 @@ export function InspectorPanelController({
     if (!active) return;
     let disposed = false;
     // Each resource coalesces independently; a slow context read cannot hold up usage or trace.
-    const refreshers = [refreshTrace, refreshContext, refreshSummary].map((refresh) => {
+    const refreshers = [
+      (background: boolean) => refreshTrace(false, background),
+      (background: boolean) => refreshContext(background),
+      (background: boolean) => refreshSummary(background),
+    ].map((refresh) => {
       let running = false;
       let dirty = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const run = () => {
+      const run = (background: boolean) => {
         if (disposed) return;
         running = true;
         dirty = false;
-        void refresh().finally(() => {
+        void refresh(background).finally(() => {
           running = false;
           if (dirty) schedule();
         });
@@ -173,10 +201,10 @@ export function InspectorPanelController({
         if (disposed || running || timer !== undefined) return;
         timer = setTimeout(() => {
           timer = undefined;
-          run();
+          run(true);
         }, 100);
       };
-      run();
+      run(false);
       return {
         schedule,
         dispose: () => {
@@ -199,6 +227,23 @@ export function InspectorPanelController({
       subscription.dispose();
     };
   }, [active, sessionId, refreshContext, refreshTrace, refreshSummary]);
+  // 面板被 memo 包裹：回调必须稳定，否则每次控制器渲染都会击穿浅比较。
+  const hideEarlier = useCallback(() => {
+    traceRequest.current += 1;
+    pageCount.current = 1;
+    setPages((current) => (current.length > 1 ? current.slice(0, 1) : current));
+    setLoading(false);
+    setLoadingEarlier(false);
+    setSelectedTraceId(undefined);
+  }, []);
+  const refreshAll = useCallback(() => {
+    void refreshTrace();
+    void refreshContext();
+    void refreshSummary();
+  }, [refreshContext, refreshSummary, refreshTrace]);
+  const loadMore = useCallback(() => {
+    void refreshTrace(true);
+  }, [refreshTrace]);
   const execution = useMemo(() => mergeExecutionPages(pages), [pages]);
   return (
     <InspectorWorkbarPanel
@@ -208,16 +253,9 @@ export function InspectorPanelController({
       summaryError={summaryError}
       loadingEarlier={loadingEarlier}
       canHideEarlier={pages.length > 1}
-      onHideEarlier={() => {
-        traceRequest.current += 1;
-        pageCount.current = 1;
-        setPages((current) => current.slice(0, 1));
-        setLoading(false);
-        setLoadingEarlier(false);
-        setSelectedTraceId(undefined);
-      }}
+      onHideEarlier={hideEarlier}
       context={context}
-      trace={[]}
+      trace={EMPTY_TRACE}
       execution={execution}
       selectedTraceId={selectedTraceId}
       loading={loading}
@@ -227,15 +265,9 @@ export function InspectorPanelController({
       selectedTab={inspectorTab}
       onTabChange={onInspectorTabChange}
       hasMore={Boolean(pages.at(-1)?.nextCursor)}
-      onRefresh={() => {
-        void refreshTrace();
-        void refreshContext();
-        void refreshSummary();
-      }}
+      onRefresh={refreshAll}
       onSelectTrace={setSelectedTraceId}
-      onLoadMore={() => {
-        if (!loading) void refreshTrace(true);
-      }}
+      onLoadMore={loadMore}
     />
   );
 }

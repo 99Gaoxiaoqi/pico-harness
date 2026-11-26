@@ -1,6 +1,6 @@
 import { experienceManagementHref } from "../experience-management-route.js";
 import { Button, IconButton } from "../components.js";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useState, memo } from "react";
 import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
 import type {
   RuntimeExecutionPage,
@@ -11,7 +11,7 @@ import { partitionTimelineRuns } from "./inspector-timeline-state.js";
 import { displayExecutionError } from "../provider-retry.js";
 import { copyDiagnostic } from "../diagnostic-copy.js";
 
-export function ExecutionTraceTimeline({
+export const ExecutionTraceTimeline = memo(function ExecutionTraceTimeline({
   execution,
   selectedTraceId,
   onSelectTrace,
@@ -164,7 +164,7 @@ export function ExecutionTraceTimeline({
       )}
     </section>
   );
-}
+});
 
 function RunSteps({
   run,
@@ -579,8 +579,23 @@ function PricingKey({ value, reason }: { value: string; reason: string | undefin
     </div>
   );
 }
+// 每次渲染都会格式化大量时间与数字；构造 Intl 实例是主要开销，按 locale 复用。
+const numberFormat = new Intl.NumberFormat("zh-CN");
+const timestampFormat = new Intl.DateTimeFormat("zh-CN", { hour12: false });
+const timeFormat = new Intl.DateTimeFormat("zh-CN", {
+  hour12: false,
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+const dayFormat = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+
 function tokens(value?: number) {
-  return value === undefined ? "未知" : value.toLocaleString("zh-CN");
+  return value === undefined ? "未知" : numberFormat.format(value);
 }
 function money(value?: number) {
   return value === undefined ? "费用未知" : `¥${value.toFixed(4)}`;
@@ -596,24 +611,15 @@ function duration(value?: number) {
 }
 function timestamp(value: string) {
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString("zh-CN", { hour12: false }) : value;
+  return Number.isFinite(date.getTime()) ? timestampFormat.format(date) : value;
 }
 function time(value: string) {
   const date = new Date(value);
-  return Number.isFinite(date.getTime())
-    ? date.toLocaleTimeString("zh-CN", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      })
-    : value;
+  return Number.isFinite(date.getTime()) ? timeFormat.format(date) : value;
 }
 function day(value: string) {
   const date = new Date(value);
-  return Number.isFinite(date.getTime())
-    ? date.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" })
-    : value;
+  return Number.isFinite(date.getTime()) ? dayFormat.format(date) : value;
 }
 function status(value: string) {
   return (

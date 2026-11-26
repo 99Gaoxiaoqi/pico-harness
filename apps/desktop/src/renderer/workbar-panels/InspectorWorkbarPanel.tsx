@@ -1,5 +1,5 @@
 import { IconButton, Button } from "../components.js";
-import { useId, useState, type KeyboardEvent } from "react";
+import { memo, useId, useState, type KeyboardEvent } from "react";
 import type {
   RuntimeExecutionPage,
   RuntimeExecutionSummary,
@@ -114,7 +114,11 @@ export function groupInspectorTraceItems(
     }));
 }
 
-export function InspectorWorkbarPanel({
+/**
+ * 面板只在检查器数据变化时重渲；控制器内的加载/刷新态切换不再重跑整棵时间线。
+ * 依赖 props 浅比较，控制器必须同时用 useCallback 稳定回调。
+ */
+export const InspectorWorkbarPanel = memo(function InspectorWorkbarPanel({
   context,
   summary,
   summaryLoading,
@@ -228,9 +232,7 @@ export function InspectorWorkbarPanel({
           </p>
         )}
         {context && (
-          <p className="tool-panel__muted">
-            读取时间 {new Date(context.generatedAt).toLocaleString("zh-CN")}
-          </p>
+          <p className="tool-panel__muted">读取时间 {formatDateTime(context.generatedAt)}</p>
         )}
         {context ? (
           <ContextComposition request={context.latestRequest} />
@@ -384,7 +386,7 @@ export function InspectorWorkbarPanel({
       </div>
     </section>
   );
-}
+});
 
 function PreviewBlock({
   label,
@@ -403,14 +405,21 @@ function PreviewBlock({
   );
 }
 
+const timestampFormat = new Intl.DateTimeFormat("zh-CN", {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+const dateTimeFormat = new Intl.DateTimeFormat("zh-CN");
+
 function formatTimestamp(value: string): string {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(timestamp);
+  return timestampFormat.format(timestamp);
+}
+
+function formatDateTime(value: number | string): string {
+  return dateTimeFormat.format(new Date(value));
 }
 
 function formatDuration(durationMs: number): string {
