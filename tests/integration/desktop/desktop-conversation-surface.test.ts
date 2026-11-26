@@ -20,7 +20,7 @@ const [
   import("../../../apps/desktop/src/renderer/conversation/ConversationQueue.js"),
 ]);
 
-test("queue exposes steer, delete and more; only plain text with a current run can steer", () => {
+test("queue exposes steer, delete and more; per-item reasons keep steer available", () => {
   const actions = {
     updateQueuedInput: async () => true,
     removeQueuedInput: async () => true,
@@ -51,7 +51,6 @@ test("queue exposes steer, delete and more; only plain text with a current run c
   assert.doesNotMatch(markup, /当前运行完成后按此顺序执行/u);
   for (const next of [
     { ...props, runId: undefined },
-    { ...props, steerSupported: false },
     {
       ...props,
       items: [{ ...props.items[0]!, input: { kind: "skill" as const, name: "review" } }],
@@ -68,9 +67,17 @@ test("queue exposes steer, delete and more; only plain text with a current run c
   ]) {
     assert.match(
       renderToStaticMarkup(React.createElement(ConversationQueue, next)),
-      /aria-label="引导第 1 条消息"[^>]*disabled/u,
+      /aria-label="引导第 1 条消息"(?![^>]*disabled)/u,
+      "a per-item reason keeps the steer button clickable so it can explain itself",
     );
   }
+  assert.match(
+    renderToStaticMarkup(
+      React.createElement(ConversationQueue, { ...props, steerSupported: false }),
+    ),
+    /aria-label="引导第 1 条消息"[^>]*disabled/u,
+    "a runtime without queue steer still disables the action",
+  );
 });
 
 test("conversation waits for the safe pause boundary before offering resume and retains queued messages", async () => {
