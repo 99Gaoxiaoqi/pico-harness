@@ -18,6 +18,7 @@ import { useRef, useState } from "react";
 
 export function ConversationActionsMenu({
   disabledReason,
+  compactDisabledReason,
   onReview,
   onRename,
   onFork,
@@ -26,6 +27,7 @@ export function ConversationActionsMenu({
   onCopyWorkspacePath,
 }: {
   readonly disabledReason?: string | undefined;
+  readonly compactDisabledReason?: string | undefined;
   readonly onReview: () => void;
   readonly onRename: () => void;
   readonly onFork: () => Promise<boolean>;
@@ -38,6 +40,7 @@ export function ConversationActionsMenu({
   const [forkError, setForkError] = useState<string>();
   const forkLock = useRef(false);
   const blocked = Boolean(disabledReason) || forkBusy;
+  const compactBlocked = blocked || Boolean(compactDisabledReason);
 
   async function fork() {
     if (blocked || forkLock.current) return;
@@ -116,10 +119,14 @@ export function ConversationActionsMenu({
         <DropdownMenuItem
           label="压缩上下文…"
           description={
-            <span>{disabledReason ?? "用摘要减少后续请求的上下文占用，保留历史记录"}</span>
+            <span>
+              {disabledReason ??
+                compactDisabledReason ??
+                "用摘要减少后续请求的上下文占用，保留历史记录"}
+            </span>
           }
           icon={<Minimize2 aria-hidden="true" />}
-          isDisabled={blocked}
+          isDisabled={compactBlocked}
           onClick={onCompact}
         />
       </DropdownMenu>

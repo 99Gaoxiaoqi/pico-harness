@@ -4,6 +4,7 @@ import type { ExperienceDiagnostic, ExperienceUse } from "@pico/core";
 import { ExperienceDrawer } from "./ExperienceDrawer.js";
 import "./ExperienceUsagePanel.css";
 import { Button, InlineNotice } from "./components.js";
+import { copyDiagnostic } from "./diagnostic-copy.js";
 import { isMemoryConflict } from "./runtime.js";
 import { experienceManagementHref } from "./experience-management-route.js";
 import {
@@ -28,6 +29,11 @@ const sourceLabels = {
   "execution-evidence": "旧版执行证据经验",
 };
 const adoptionLabels = { unknown: "未知", observed: "已观察到采用要点", not_applied: "未采用" };
+const deliveryLabels: Readonly<Record<string, string>> = {
+  carried: "已引用",
+  pending: "等待下轮生效",
+  unknown: "未能确认是否送达",
+};
 const validationLabels = {
   unknown: "尚无结论",
   pass: "验证通过",
@@ -88,9 +94,9 @@ export function ExperienceUsagePanel({
           <summary>
             <span>经验使用记录</span>
             <span>{carried} 条已引用</span>
-            {pending > 0 && <span>{pending} 条待注入</span>}
+            {pending > 0 && <span>{pending} 条{deliveryLabels.pending}</span>}
             {historical > 0 && <span>{historical} 条旧记录</span>}
-            {unconfirmed > 0 && <span>{unconfirmed} 条引用未确认</span>}
+            {unconfirmed > 0 && <span>{unconfirmed} 条{deliveryLabels.unknown}</span>}
           </summary>
           <div className="task-experience__summary-content">
             <p>
@@ -143,12 +149,12 @@ function DrawerUsage({ uses, diagnostics = [], ...props }: ExperienceUsagePanelP
                 </span>
                 <span>
                   {use.historical
-                    ? "旧记录"
+                    ? "旧记录，当时只送达了一部分"
                     : use.delivery === "carried"
-                      ? "已引用"
+                      ? deliveryLabels.carried
                       : use.delivery === "pending"
-                        ? "待注入"
-                        : "引用未确认"}
+                        ? deliveryLabels.pending
+                        : deliveryLabels.unknown}
                   {" · 引用版本 v"}
                   {use.source.kind === "reviewed-reference"
                     ? use.source.contentVersion
@@ -359,6 +365,25 @@ function UseCard({
     stopped && use.source.kind !== "reviewed-reference" ? "archived" : "saved",
   );
   const unconfirmed = !use.historical && use.delivery !== "carried";
+  const recordedSources = current.deleted ? [] : (detail?.use.sources ?? use.sources);
+  const diagnosticText = JSON.stringify(
+    {
+      useId: use.useId,
+      itemId: use.itemId,
+      itemVersion: use.itemVersion,
+      referenceHash: use.referenceHash,
+      taskId: use.taskId,
+      taskVersion: use.taskVersion,
+      sessionId: use.sessionId,
+      runId: use.runId,
+      recallSequence: use.recallSequence,
+      deliverySequence: use.deliverySequence,
+      effects: detail?.effects ?? [],
+      sources: recordedSources,
+    },
+    null,
+    2,
+  );
   return (
     <article
       className="memory-card task-experience__reference"
@@ -372,12 +397,12 @@ function UseCard({
         <span className="task-experience__meta">
           <span>
             {use.historical
-              ? "旧记录，注入时序不完整"
+              ? "旧记录，当时只送达了一部分"
               : use.delivery === "carried"
-                ? "已引用"
+                ? deliveryLabels.carried
                 : use.delivery === "pending"
-                  ? "待注入"
-                  : "引用未确认"}
+                  ? deliveryLabels.pending
+                  : deliveryLabels.unknown}
           </span>
           <span>
             {use.source.kind === "reviewed-reference"
@@ -390,13 +415,16 @@ function UseCard({
               : use.source.kind === "execution-evidence"
                 ? "保存时证据：历史执行记录，范围未知"
                 : learningVersion === 3
-                  ? "保存为建议与用户批准均不等于执行验证"
+                  ? "来自建议或人工批准，尚未经过执行验证"
                   : "保存时验收：试用或用户审核均不等于执行验证"}
           </span>
-          <span>采用：{unconfirmed ? "未知（引用未确认）" : adoptionLabels[current.adoption]}</span>
+          <span>
+            采用：
+            {unconfirmed ? `未知（${deliveryLabels.unknown}）` : adoptionLabels[current.adoption]}
+          </span>
           <span>
             本次结果：{unconfirmed ? "尚无经验效果归因" : validationLabels[current.validation]} ·{" "}
-            {unconfirmed ? "引用未确认" : scopeLabels[current.validationScope]}
+            {unconfirmed ? deliveryLabels.unknown : scopeLabels[current.validationScope]}
           </span>
           {current.excluded && <span>本次已排除</span>}
           {current.deleted || detail?.currentItemUnavailable ? (
@@ -413,12 +441,14 @@ function UseCard({
       {current.referenceContent && (
         <p className="task-experience__content">{referenceBody(current.referenceContent)}</p>
       )}
-      {unconfirmed && <p>引用尚未确认，独立执行结果仍保留，但不能归因于这条经验。</p>}
+      {unconfirmed && (
+        <p>{deliveryLabels.unknown}，独立执行结果仍保留，但不能归因于这条经验。</p>
+      )}
       {!unconfirmed && current.validationScope !== "unknown" && (
         <p>本次结果只验证列明范围内的操作，不代表经验正文、根因或整个任务已验证。</p>
       )}
       {(use.historical || current.validationScope === "unknown") && (
-        <p>历史记录或未知范围的 pass 不能证明建议全文、当前用户目标或最终回答正确。</p>
+        <p>历史记录或未限定范围的验证，不能证明建议全文或最终回答正确。</p>
       )}
       <div className="memory-card__actions">
         {!inspectOnMount && (
@@ -523,16 +553,6 @@ function UseCard({
           {detail?.managementError && (
             <InlineNotice tone="warning">{detail.managementError}</InlineNotice>
           )}
-          <p>
-            记忆：{use.itemId} · 版本 {use.itemVersion} · 引用摘要：{use.referenceHash}
-          </p>
-          <p>
-            任务：{use.taskId} · 版本 {use.taskVersion} · 会话：{use.sessionId} · 运行：{use.runId}
-          </p>
-          <p>
-            召回序号：{use.recallSequence ?? "未记录"} · 注入序号：
-            {use.deliverySequence ?? "未记录"}
-          </p>
           {!current.deleted &&
             detail?.effects.map((effect) => (
               <div key={effect.effectId}>
@@ -542,18 +562,48 @@ function UseCard({
                   · {scopeLabels[effect.validationScope]}
                 </p>
                 <p>{effect.reason}</p>
-                <p>
-                  派发：{effect.preparedEventId}（{effect.preparedSequence}）· 结果：
-                  {effect.outcomeEventId}（{effect.outcomeSequence}）
-                </p>
               </div>
             ))}
           {detail && detail.effects.length === 0 && <p>尚无本次采用或验证事件。</p>}
-          {(current.deleted ? [] : (detail?.use.sources ?? use.sources)).map((source) => (
-            <p key={JSON.stringify(source)}>
-              来源：{source.sessionId} · {source.runId} · {source.eventId}
+          {recordedSources.length > 0 && <p>来源记录：{recordedSources.length} 条</p>}
+          <details className="memory-source">
+            <summary>诊断信息</summary>
+            <p>
+              记忆：{use.itemId} · 版本 {use.itemVersion} · 引用摘要：{use.referenceHash}
             </p>
-          ))}
+            <p>
+              任务：{use.taskId} · 版本 {use.taskVersion} · 会话：{use.sessionId} · 运行：
+              {use.runId}
+            </p>
+            <p>
+              召回序号：{use.recallSequence ?? "未记录"} · 送达序号：
+              {use.deliverySequence ?? "未记录"}
+            </p>
+            {!current.deleted &&
+              detail?.effects.map((effect) => (
+                <p key={`${effect.effectId}:dispatch`}>
+                  派发：{effect.preparedEventId}（{effect.preparedSequence}）· 结果：
+                  {effect.outcomeEventId}（{effect.outcomeSequence}）
+                </p>
+              ))}
+            {recordedSources.map((source) => (
+              <p key={JSON.stringify(source)}>
+                来源：{source.sessionId} · {source.runId} · {source.eventId}
+              </p>
+            ))}
+            <Button
+              variant="quiet"
+              disabled={busy}
+              onClick={() =>
+                void copyDiagnostic(diagnosticText).then(
+                  () => setNotice("诊断信息已复制。"),
+                  () => setError("复制失败，请重试。"),
+                )
+              }
+            >
+              复制诊断信息
+            </Button>
+          </details>
         </div>
       )}
     </article>

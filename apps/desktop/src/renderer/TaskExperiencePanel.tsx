@@ -851,7 +851,7 @@ function ConversationReviewCard({
         action === "accept"
           ? "已确认并启用；这不代表经验已经通过验证。"
           : action === "defer"
-            ? "已暂缓，这条经验不会用于后续任务。"
+            ? "已稍后决定，这条经验不会用于后续任务。"
             : action === "keep_case"
               ? "已保留为案例，取消本次决定请求。"
               : "已删除，这条经验不会用于后续任务。",
@@ -968,10 +968,10 @@ function ConversationReviewCard({
             </Button>
           )}
           <Button variant="quiet" disabled={busy} onClick={() => void act("defer")}>
-            {current.usagePolicy ? "稍后决定" : "暂缓"}
+            稍后决定
           </Button>
           <Button variant="quiet" disabled={busy} onClick={() => void act("reject")}>
-            {current.usagePolicy ? "删除" : "拒绝"}
+            删除
           </Button>
         </div>
       )}
@@ -1506,14 +1506,14 @@ function ExperienceDetailCard({
                   disabled={busy || unavailable}
                   onClick={() => void act("defer")}
                 >
-                  {v3 ? "稍后决定" : "暂缓"}
+                  稍后决定
                 </Button>
                 <Button
                   variant="quiet"
                   disabled={busy || unavailable}
                   onClick={() => void act("reject")}
                 >
-                  {v3 ? "删除并拒绝" : "拒绝"}
+                  删除
                 </Button>
               </>
             )}
@@ -1777,7 +1777,7 @@ function ExperienceReference({
       <header>
         <strong>{current?.goal || "任务经验参考"}</strong>
         <span className="task-experience__meta">
-          <span>旧引用记录 v{reference.contentVersion}（时序不完整）</span>
+          <span>旧引用记录 v{reference.contentVersion}（当时只送达了一部分）</span>
           <span>
             采用：
             {reference.adoption === "observed"
@@ -1790,7 +1790,7 @@ function ExperienceReference({
           <span>{excluded || reference.excluded ? "本次已排除参考" : "本次参考"}</span>
         </span>
       </header>
-      <p>旧记录未保存完整的注入时序与验证范围，历史 pass 不代表建议全文或当前任务已验证。</p>
+      <p>旧记录未保存完整的送达与验证范围；历史记录或未限定范围的验证，不能证明建议全文或最终回答正确。</p>
       {reference.referenceContent ? (
         <p>{reference.referenceContent}</p>
       ) : current?.contentVersion === reference.contentVersion ? (
