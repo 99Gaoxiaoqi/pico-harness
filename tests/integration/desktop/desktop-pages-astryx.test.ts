@@ -151,6 +151,7 @@ import {ConversationInteractionSlot} from "./apps/desktop/src/renderer/conversat
 import {ConversationTranscript} from "./apps/desktop/src/renderer/conversation/ConversationTranscript.tsx";
 import {SideChatWorkbarPanel} from "./apps/desktop/src/renderer/workbar-panels/SideChatWorkbarPanel.tsx";
 import {RuntimeContext} from "./apps/desktop/src/renderer/runtime-context.tsx";
+import {ArchiveUndoProvider} from "./apps/desktop/src/renderer/archive-undo.tsx";
 import {previewData} from "./apps/desktop/src/renderer/fixture.ts";
 import {applyProviderRetryNotification,providerRetryKey} from "./apps/desktop/src/renderer/provider-retry.ts";
 import {sessionHref,workspaceSessionKey} from "./apps/desktop/src/renderer/workspace-session.ts";
@@ -242,7 +243,7 @@ async function scenario(){
   const disabledRuntime={...runtime,data:{...previewData,jobs:previewData.jobs.map((job,index)=>index===0?{...job,enabled:false,nextRunAt:Date.now()+60_000}:job)}};
   await act(async()=>root.render(<MemoryRouter><RuntimeContext value={disabledRuntime}><AutomationsPage/></RuntimeContext></MemoryRouter>));
   check(document.body.textContent.includes("已停用，无下次执行"),"A disabled automation does not present a scheduled timestamp as its next execution");
-  await act(async()=>root.render(<RuntimeContext value={runtime}><MemoryRouter><SessionsPage/></MemoryRouter></RuntimeContext>));
+  await act(async()=>root.render(<RuntimeContext value={runtime}><MemoryRouter><ArchiveUndoProvider><SessionsPage/></ArchiveUndoProvider></MemoryRouter></RuntimeContext>));
   const before=document.querySelectorAll(".session-row").length;
   await act(async()=>document.querySelector('input[type="checkbox"]').click());
   check(document.querySelectorAll(".session-row").length>before,"Show-archived checkbox works");

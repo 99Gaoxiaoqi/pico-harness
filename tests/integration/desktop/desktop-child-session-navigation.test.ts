@@ -7,7 +7,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { previewData } from "../../../apps/desktop/src/renderer/fixture.js";
 
-import { HomePage } from "../../../apps/desktop/src/renderer/pages/HomePage.js";
+import { ArchiveUndoProvider } from "../../../apps/desktop/src/renderer/archive-undo.js";
+import { SessionsPage } from "../../../apps/desktop/src/renderer/pages/SessionsPage.js";
 import { RuntimeContext } from "../../../apps/desktop/src/renderer/runtime-context.js";
 import type { RuntimeStore } from "../../../apps/desktop/src/renderer/runtime.js";
 import {
@@ -80,12 +81,16 @@ test("隐藏子会话按详情冷启动及刷新，跨工作区返回父任务�
       },
     }),
   };
-  function renderHome() {
+  function renderSessionLibrary() {
     return renderToStaticMarkup(
       React.createElement(
         RuntimeContext.Provider,
         { value: runtime },
-        React.createElement(MemoryRouter, { initialEntries: ["/"] }, React.createElement(HomePage)),
+        React.createElement(
+          MemoryRouter,
+          { initialEntries: ["/sessions"] },
+          React.createElement(ArchiveUndoProvider, null, React.createElement(SessionsPage)),
+        ),
       ),
     );
   }
@@ -119,9 +124,9 @@ test("隐藏子会话按详情冷启动及刷新，跨工作区返回父任务�
     ...parent,
     name: "持久子代理名称",
   });
-  const home = renderHome();
-  assert.match(home, /父任务标题/u);
-  assert.doesNotMatch(home, /持久子代理名称|子会话持久标题/u);
+  const library = renderSessionLibrary();
+  assert.match(library, /父任务标题/u);
+  assert.doesNotMatch(library, /持久子代理名称|子会话持久标题/u);
   assert.deepEqual(runtime.data.sessions, sessions);
   assert.equal(runtime.data.sessions.length, 1);
 });
