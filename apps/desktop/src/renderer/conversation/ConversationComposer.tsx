@@ -250,6 +250,8 @@ export function ConversationComposer({
       ? ["等待暂停，将在安全边界暂停", statusText].filter(Boolean).join(" · ")
       : defaultStatusText;
   const showLiveRunStatus = status === "running" && !busy && !statusText && startedAt !== undefined;
+  const showRuntimeRow =
+    status !== "idle" || resolvedStatusText !== undefined || Boolean(trailingAccessory);
 
   const submit = () => {
     if (!canSubmit) return;
@@ -281,6 +283,7 @@ export function ConversationComposer({
       data-status={status}
       data-behavior={effectiveBehavior}
       data-has-value={value.trim().length > 0 || undefined}
+      data-runtime={showRuntimeRow || undefined}
       aria-label="消息输入"
       aria-busy={busy}
       onSubmit={handleSubmit}
