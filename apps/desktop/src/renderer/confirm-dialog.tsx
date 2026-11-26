@@ -3,7 +3,6 @@ import { AlertTriangle } from "lucide-react";
 import { useId, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Button } from "./components.js";
 import { TextField } from "./ui-controls.js";
-import "./confirm-dialog.css";
 
 export interface ConfirmDialogOptions {
   /** Question shown as the dialog heading. */
