@@ -105,3 +105,25 @@ final result: passed
 - [修改后·空闲](docs/assets/composer-running/after-idle.png)、[修改后·运行中](docs/assets/composer-running/after-running.png)、[修改后·发送中](docs/assets/composer-running/after-sending.png)
 
 截图由 headless Chrome 渲染与集成测试相同的 composer 场景后裁取输入卡片区域，比例 2×（1640×320 像素）。`tests/integration/desktop/desktop-composer-geometry.test.ts` 新增三态 DOM 几何断言；回退本次 CSS 后该用例在“运行态控件使用独立行”处失败，量测到控件行高 62px、状态行与控件同行。renderer 类型检查（应用 `patches/` 后）通过。
+
+
+## 空闲态塌缩运行槽位（2026-11-26）
+
+final result: passed
+
+上一版为稳定运行态布局永久保留两行底栏，空闲态也占满 62px 底栏并把 composer 撑到 118px，视觉上上下留白过大。现改为：运行槽位（状态文字、行为选择器、暂停/停止）位于固定控件行上方，空闲态高度为 0；运行时从卡片底部向上展开，因此模型/权限/思考强度 `max`/发送按钮所在的控件行始终停在原位。同时收紧 composer 内边距与行距（`padding: 8px 12px 6px`、输入与底栏间距 4px、`min-height: 72px`），空闲态总高度从 118px 降到 76px。
+
+800px 宽输入卡片（1000×700 视口）的 `getBoundingClientRect` 量测：
+
+| 状态   | 修改前 composer 高 / 控件行 y / 运行槽 | 修改后 composer 高 / 控件行 y / 运行槽 |
+| ------ | -------------------------------------- | -------------------------------------- |
+| 空闲   | 118 / 610 / 占位 28px                  | 76 / 647 / 0px                         |
+| 运行中 | 118 / 610 / 28px                       | 110 / 647 / 28px（控件行上方）         |
+| 发送中 | 118 / 610 / 28px                       | 110 / 647 / 28px（控件行上方）         |
+
+修改后三态的控件行成员、逐项 `x/y/w/h`、发送按钮坐标完全一致（`thinking` 均为 `x=662.58, y=647`）；空闲、运行、发送的 composer 底边都保持在 682px，运行槽向上扩展。三态 max 均留在第一行，不再回退到换行布局。
+
+- [修改前·空闲](docs/assets/composer-compact/before-idle.png)、[修改前·运行中](docs/assets/composer-compact/before-running.png)、[修改前·发送中](docs/assets/composer-compact/before-sending.png)
+- [修改后·空闲](docs/assets/composer-compact/after-idle.png)、[修改后·运行中](docs/assets/composer-compact/after-running.png)、[修改后·发送中](docs/assets/composer-compact/after-sending.png)
+
+截图由 headless Chrome 渲染与集成测试相同的 composer 场景后裁取输入卡片区域，比例 2×（1640×320 像素）。`tests/integration/desktop/desktop-composer-geometry.test.ts` 更新为三态断言：空闲运行槽高度为 0 且 composer 高不超过 90px，运行/发送槽位展开、composer 向上增高且保持底边不动，控件行与发送按钮三态逐项一致；诊断徽标用例改为验证运行态向上增高而不改变输入框高度的场景。

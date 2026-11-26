@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runRendererBrowserScenario } from "./renderer-browser-fixture.js";
 
-test("运行状态与诊断徽标都不改变输入框和页脚几何", { timeout: 45_000 }, async () => {
+test("诊断徽标不改变空闲态几何，运行态从底部向上增高", { timeout: 45_000 }, async () => {
   const result = await runRendererBrowserScenario(`
 import * as React from 'react';
 import { act } from 'react';
@@ -72,7 +72,9 @@ const stable=(left,right,label)=>{
  await frame();
  const runningEmptyTag=snapshot();
  check(document.querySelector('.conversation-composer__status')?.textContent?.includes('正在处理'),'running status renders in the footer');
- stable(idleEmptyTag,runningEmptyTag,'run status and controls');
+ check(runningEmptyTag.form.h>idleEmptyTag.form.h+20,'runtime controls expand the composer: '+JSON.stringify({idle:idleEmptyTag.form,running:runningEmptyTag.form}));
+ check(Math.abs(runningEmptyTag.form.y+runningEmptyTag.form.h-(idleEmptyTag.form.y+idleEmptyTag.form.h))<=0.5,'runtime controls grow upward from the bottom-anchored composer: '+JSON.stringify({idle:idleEmptyTag.form,running:runningEmptyTag.form}));
+ check(runningEmptyTag.input.h===idleEmptyTag.input.h,'runtime controls do not resize the input: '+JSON.stringify({idle:idleEmptyTag.input,running:runningEmptyTag.input}));
  const multiline='这是一段很长的草稿文字，用来验证输入框在文字换行变高时仍然保持页脚和诊断徽标的几何位置。'.repeat(14);
  await act(async()=>render(multiline,'running',true));
  await frame();
@@ -92,7 +94,7 @@ const stable=(left,right,label)=>{
   assert.equal(result, "PASS: composer geometry", result);
 });
 
-test("运行态状态放进独立底栏行，不挤走 max 等控件", { timeout: 45_000 }, async () => {
+test("空闲态塌缩运行槽位，第一行控件坐标三态一致", { timeout: 45_000 }, async () => {
   const result = await runRendererBrowserScenario(`
 import * as React from 'react';
 import { act } from 'react';
@@ -166,9 +168,10 @@ const memberKey=node=>{
   if(node.matches('.conversation-context-gauge'))return 'gauge';
   const control=node.closest('[data-control]');
   if(control)return control.dataset.control;
-  return 'unknown:'+node.tagName+':'+node.textContent.trim();
+  return 'control:'+node.textContent.trim();
 };
 const snapshot=()=>({
+  runtime:document.querySelector('.conversation-composer').dataset.runtime??null,
   footer:rect(document.querySelector('.pico-astryx-composer > div > div:last-child')),
   form:rect(document.querySelector('.conversation-composer')),
   input:rect(document.querySelector('.pico-chat-input [contenteditable]')),
@@ -183,46 +186,50 @@ const sameRect=(left,right,label)=>{
   for(const key of ['x','y','w','h'])
     check(Math.abs(left[key]-right[key])<=0.5,label+' changes '+key+': '+JSON.stringify({left,right}));
 };
+const sameControlRow=(reference,current,label)=>{
+  check(current.members.length===reference.members.length,label+' keeps the same control members: '+JSON.stringify({reference:reference.members.map(m=>m.key),current:current.members.map(m=>m.key)}));
+  reference.members.forEach((member,index)=>{
+    check(member.key===current.members[index].key,label+' member order changes at '+index+': '+JSON.stringify({reference:member.key,current:current.members[index].key}));
+    sameRect(member.rect,current.members[index].rect,label+' '+member.key);
+  });
+  sameRect(reference.controls,current.controls,label+' control row');
+  sameRect(reference.send,current.send,label+' send button');
+};
 const frame=()=>{const {promise,resolve}=Promise.withResolvers();requestAnimationFrame(()=>requestAnimationFrame(resolve));return promise};
 (async()=>{
   await act(async()=>render('idle',false));
   await frame();
   const idle=snapshot();
+  check(idle.runtime===null,'idle keeps the runtime row collapsed');
+  check(idle.actions.h===0,'idle runtime row has zero height: '+JSON.stringify(idle.actions));
+  check(idle.form.h<=90,'idle composer is compact: '+JSON.stringify(idle.form));
   check(idle.members.length>=8,'idle footer keeps every control: '+JSON.stringify(idle.members));
   check(idle.members.some(member=>member.key==='thinking'),'thinking (max) control renders');
   check(Math.abs(idle.members.find(member=>member.key==='thinking').rect.y-idle.controls.y)<=0.5,'idle keeps max on the control row');
   await act(async()=>render('running',false,'3 条消息正在排队'));
   await frame();
   const running=snapshot();
+  check(running.runtime==='true','running expands the runtime row');
+  check(running.actions.h>0,'running runtime row expands: '+JSON.stringify(running.actions));
+  check(running.footer.h>idle.footer.h,'running footer grows for the runtime row: '+JSON.stringify({idle:idle.footer,running:running.footer}));
+  check(running.form.h>=idle.form.h+30,'running composer grows above the pinned row: '+JSON.stringify({idle:idle.form,running:running.form}));
+  check(Math.abs(running.form.y+running.form.h-(idle.form.y+idle.form.h))<=0.5,'composer stays bottom-anchored: '+JSON.stringify({idle:idle.form,running:running.form}));
+  check(running.actions.y+running.actions.h<=running.controls.y-4,'runtime row sits above the control row: '+JSON.stringify({controls:running.controls,actions:running.actions}));
   check(document.querySelector('.conversation-composer__status')?.textContent.includes('3 条消息正在排队'),'running status renders');
-  check(running.actions.y>=running.controls.y+running.controls.h,'runtime controls use their own row: '+JSON.stringify({controls:running.controls,actions:running.actions}));
-  check(Math.abs(running.actions.w-running.footer.w)<=0.5,'runtime row spans the footer width: '+JSON.stringify({footer:running.footer,actions:running.actions}));
-  check(running.members.length===idle.members.length,'running keeps the same control members: '+JSON.stringify({idle:idle.members.map(m=>m.key),running:running.members.map(m=>m.key)}));
-  idle.members.forEach((member,index)=>{
-    check(member.key===running.members[index].key,'member order changes at '+index+': '+JSON.stringify({idle:member.key,running:running.members[index].key}));
-    sameRect(member.rect,running.members[index].rect,'running '+member.key);
-  });
-  sameRect(idle.controls,running.controls,'running control row');
-  sameRect(idle.footer,running.footer,'running footer');
-  sameRect(idle.form,running.form,'running composer');
-  sameRect(idle.input,running.input,'running input');
-  sameRect(idle.send,running.send,'running send button');
+  sameControlRow(idle,running,'running');
   await act(async()=>render('idle',true,'正在发送…'));
   await frame();
   const sending=snapshot();
-  check(sending.members.length===idle.members.length,'sending keeps the same control members: '+JSON.stringify(sending.members.map(m=>m.key)));
-  idle.members.forEach((member,index)=>{
-    check(member.key===sending.members[index].key,'sending member order changes at '+index);
-    sameRect(member.rect,sending.members[index].rect,'sending '+member.key);
-  });
-  sameRect(idle.controls,sending.controls,'sending control row');
-  sameRect(idle.footer,sending.footer,'sending footer');
-  sameRect(idle.form,sending.form,'sending composer');
-  sameRect(idle.input,sending.input,'sending input');
-  sameRect(idle.send,sending.send,'sending send button');
+  check(sending.runtime==='true','sending expands the runtime row');
+  check(sending.actions.h>0,'sending runtime row expands: '+JSON.stringify(sending.actions));
+  check(sending.footer.h>idle.footer.h,'sending footer grows for the runtime row: '+JSON.stringify({idle:idle.footer,sending:sending.footer}));
+  check(sending.form.h>=idle.form.h+30,'sending composer grows above the pinned row: '+JSON.stringify({idle:idle.form,sending:sending.form}));
+  check(sending.actions.y+sending.actions.h<=sending.controls.y-4,'sending runtime row sits above the control row: '+JSON.stringify({controls:sending.controls,actions:sending.actions}));
+  check(document.querySelector('.conversation-composer__status')?.textContent.includes('正在发送'),'sending status renders');
+  sameControlRow(idle,sending,'sending');
   await act(async()=>root.unmount());
-  await fetch('/result',{method:'POST',body:'PASS: composer runtime row'});
+  await fetch('/result',{method:'POST',body:'PASS: composer compact'});
 })().catch(async error=>fetch('/result',{method:'POST',body:'FAIL: '+(error.stack||error)}));
 `);
-  assert.equal(result, "PASS: composer runtime row", result);
+  assert.equal(result, "PASS: composer compact", result);
 });
