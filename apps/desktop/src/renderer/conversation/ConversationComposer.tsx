@@ -405,7 +405,7 @@ export function ConversationComposer({
               <Button
                 className="conversation-composer__attach"
                 type="button"
-                label={filesDisabled ? (filesDisabledReason ?? "当前无法添加附件") : "添加文件"}
+                label="添加文件"
                 tooltip={filesDisabled ? (filesDisabledReason ?? "当前无法添加附件") : "添加文件"}
                 icon={<Paperclip aria-hidden="true" />}
                 variant="ghost"
