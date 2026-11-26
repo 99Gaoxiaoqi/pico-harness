@@ -37,8 +37,8 @@ const button=(id,label)=>[...card(id).querySelectorAll('button')].find(node=>nod
  const diagnosis=document.querySelector('[aria-label="最近记录诊断"]');
  check(diagnosis&&!diagnosis.open&&diagnosis.textContent.includes('执行核对')&&diagnosis.textContent.includes('这次执行核对未能完成')&&!document.querySelector('[role=alert]'),'historical diagnosis is collapsed and never presented as current outage');
  const summary=document.querySelector('summary').textContent;
- check(summary.includes('1 条已引用')&&summary.includes('1 条待注入')&&!summary.includes('条旧记录'),'delivery counts never promote pending or historical records');
- check(card('reviewed').textContent.includes('待注入')&&card('reviewed').textContent.includes('用户审核：请在经验详情查看'),'review confirmation is independent of delivery');
+ check(summary.includes('1 条已引用')&&summary.includes('1 条等待下轮生效')&&!summary.includes('条旧记录'),'delivery counts never promote pending or historical records');
+ check(card('reviewed').textContent.includes('等待下轮生效')&&card('reviewed').textContent.includes('用户审核：请在经验详情查看'),'review confirmation is independent of delivery');
  check(card('native').textContent.includes('保存时验收：限定执行目标通过')&&card('native').textContent.includes('采用：已观察到采用要点')&&card('native').textContent.includes('本次结果：验证通过'),'native saved acceptance, adoption and current outcome are distinct');
  check(card('legacy').textContent==='旧版经验已移除'&&!card('legacy').querySelector('button,a'),'removed legacy use has no body, provenance, results or actions');
  check(card('old-host').textContent==='旧版经验不可用，请更新电脑端完成清理。'&&!card('old-host').querySelector('button,a'),'old Host response never claims deletion or exposes reference content');
