@@ -14,6 +14,7 @@ import type {
   RemoteWorkspace,
 } from "../../preload/remote-management-contract.js";
 import { Button, InlineNotice } from "../components.js";
+import { MobileRecoveryNotice } from "../MobileRecoveryNotice.js";
 import { SwitchField, TextField } from "../ui-controls.js";
 import { RemoteSupervisionStatus } from "../RemoteSupervisionStatus.js";
 import { useRuntime } from "../runtime-context.js";
@@ -138,6 +139,15 @@ export function MobileConnectionSettingsPage() {
         </div>
       )}
       {snapshot?.issue && <InlineNotice tone="warning">{snapshot.issue}</InlineNotice>}
+      <MobileRecoveryNotice
+        visible={Boolean(snapshot?.enabled && !snapshot.running && config?.configured)}
+        busy={busy || !api}
+        onRetry={() =>
+          void run(async () => {
+            if (api) setSnapshot(unwrap(await api.start({})));
+          })
+        }
+      />
       <section
         className="mobile-settings-section mobile-status-section"
         aria-labelledby="mobile-status-heading"

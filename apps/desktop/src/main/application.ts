@@ -345,9 +345,8 @@ if (!app.requestSingleInstanceLock()) {
           !event.sender.isDestroyed() &&
           event.senderFrame === event.sender.mainFrame,
       });
-      void remoteManagement
-        .restore()
-        .catch(() => console.error("手机连接自动恢复失败，请在设置中重试"));
+      // 自启动恢复：有限退避、静默；失败状态由手机连接设置页展示并提供重试。
+      void remoteManagement.recoverOnStartup();
       disposeUpdater = configureAutoUpdates(
         () => lifecycle.markQuitting(),
         () => remoteManagement.prepareForUpdate(),

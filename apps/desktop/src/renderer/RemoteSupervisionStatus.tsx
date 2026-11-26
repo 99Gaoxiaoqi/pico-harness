@@ -17,6 +17,7 @@ const issues: Record<NonNullable<RemoteSupervisionSnapshot["issueCode"]>, string
     "已登记的应用文件不存在。请从应用的新位置打开 Pico 一次，重新登记后台启动位置。",
   registration_missing: "系统后台恢复尚未登记。请关闭并重新开启手机连接。",
   startup_timeout: "后台服务启动超时。请检查应用安装和连接设置后重试。",
+  startup_failed: "后台服务未能自动恢复。请检查连接配置后重试。",
 };
 export function RemoteSupervisionStatus({
   supervision,
