@@ -68,7 +68,7 @@ const selectProject=async label=>{
   await mount('/task/new');
   check(cards().length===0&&editor().textContent==='','source draft consumed');
   await mount(newSessionHref(project));
-  await selectProject('无项目');
+  await selectProject('Chosen folder');
   await selectProject('Existing project');
   check(cards().length===2&&readPersistentDraft('new:'+project)===merged,'round trip does not duplicate files or text');
   await submit();
@@ -80,7 +80,7 @@ const selectProject=async label=>{
   await mount('/task/new');
   const onlyFile=new File(['file only content'],'only.txt');
   await pick(onlyFile);failure='file only upload failed';await submit();
-  await selectProject('打开项目文件夹…');
+  await selectProject('添加项目…');
   check(folderChoices===1&&route===newSessionHref(folder),'folder picker switches project');
   check(cards().length===1&&cards()[0].textContent.includes('file only upload failed')&&editor().textContent==='','file-only draft and error survive folder selection');
   await submit();

@@ -6,9 +6,10 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { previewData } from "../../../apps/desktop/src/renderer/fixture.js";
+import { ArchiveUndoProvider } from "../../../apps/desktop/src/renderer/archive-undo.js";
 import { AutomationsPage } from "../../../apps/desktop/src/renderer/pages/AutomationsPage.js";
-import { HomePage } from "../../../apps/desktop/src/renderer/pages/HomePage.js";
 import { ReviewPage } from "../../../apps/desktop/src/renderer/pages/ReviewPage.js";
+import { SessionsPage } from "../../../apps/desktop/src/renderer/pages/SessionsPage.js";
 import { SettingsPage } from "../../../apps/desktop/src/renderer/pages/SettingsPage.js";
 import { RuntimeContext } from "../../../apps/desktop/src/renderer/runtime-context.js";
 import type { RuntimeStore } from "../../../apps/desktop/src/renderer/runtime.js";
@@ -46,7 +47,7 @@ test("extracted desktop pages share the supplied runtime context and route scope
       React.createElement(
         MemoryRouter,
         { initialEntries: [`/review?workspace=${encodeURIComponent(session.workspacePath)}`] },
-        React.createElement(HomePage),
+        React.createElement(ArchiveUndoProvider, null, React.createElement(SessionsPage)),
         React.createElement(AutomationsPage),
         React.createElement(ReviewPage),
         React.createElement(SettingsPage),

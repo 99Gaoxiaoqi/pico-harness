@@ -1,10 +1,20 @@
+import { isMacPlatform } from "../platform.js";
 import type { WorkbarTab, WorkbarToolKind } from "./types.js";
+
+/** Platform-neutral key binding; the launcher renders it per operating system. */
+export interface WorkbarShortcut {
+  readonly key: string;
+  readonly mod?: boolean;
+  readonly ctrl?: boolean;
+  readonly alt?: boolean;
+  readonly shift?: boolean;
+}
 
 export interface WorkbarToolDefinition {
   readonly kind: WorkbarToolKind;
   readonly label: string;
   readonly description: string;
-  readonly shortcut?: string;
+  readonly shortcut?: WorkbarShortcut;
   readonly multiple: boolean;
   readonly persistsAcrossRestart: boolean;
 }
@@ -20,9 +30,9 @@ export interface WorkbarShortcutEvent {
 export const WORKBAR_TOOL_REGISTRY = [
   {
     kind: "side-chat",
-    label: "侧边对话",
+    label: "侧聊",
     description: "从最近完成的回合建立临时分支对话",
-    shortcut: "Mod+Alt+S",
+    shortcut: { key: "s", mod: true, alt: true },
     multiple: true,
     persistsAcrossRestart: false,
   },
@@ -30,7 +40,7 @@ export const WORKBAR_TOOL_REGISTRY = [
     kind: "review",
     label: "变更",
     description: "查看工作区实时 Git 变更和差异",
-    shortcut: "Ctrl+Shift+G",
+    shortcut: { key: "g", ctrl: true, shift: true },
     multiple: false,
     persistsAcrossRestart: true,
   },
@@ -38,7 +48,7 @@ export const WORKBAR_TOOL_REGISTRY = [
     kind: "terminal",
     label: "终端",
     description: "在当前任务中新建一个终端",
-    shortcut: "Ctrl+`",
+    shortcut: { key: "`", ctrl: true },
     multiple: true,
     persistsAcrossRestart: false,
   },
@@ -46,7 +56,7 @@ export const WORKBAR_TOOL_REGISTRY = [
     kind: "browser",
     label: "浏览器",
     description: "打开用户与 Agent 共用的任务浏览器",
-    shortcut: "Mod+T",
+    shortcut: { key: "t", mod: true },
     multiple: false,
     persistsAcrossRestart: true,
   },
@@ -54,7 +64,7 @@ export const WORKBAR_TOOL_REGISTRY = [
     kind: "files",
     label: "生成文件",
     description: "查看当前任务生成的产物",
-    shortcut: "Mod+P",
+    shortcut: { key: "p", mod: true },
     multiple: false,
     persistsAcrossRestart: true,
   },
@@ -80,6 +90,23 @@ export const WORKBAR_TOOL_REGISTRY = [
     persistsAcrossRestart: true,
   },
 ] as const satisfies readonly WorkbarToolDefinition[];
+
+/** Renders a shortcut for the current platform (⌘⌥S on macOS, Ctrl+Alt+S elsewhere). */
+export function formatWorkbarShortcut(
+  shortcut: WorkbarShortcut,
+  mac: boolean = isMacPlatform(),
+): string {
+  const key = shortcut.key.toUpperCase();
+  if (mac && !shortcut.ctrl && (shortcut.mod === true || shortcut.alt === true)) {
+    return `${shortcut.mod ? "⌘" : ""}${shortcut.alt ? "⌥" : ""}${shortcut.shift ? "⇧" : ""}${key}`;
+  }
+  const parts: string[] = [];
+  if (shortcut.mod || shortcut.ctrl) parts.push("Ctrl");
+  if (shortcut.alt) parts.push("Alt");
+  if (shortcut.shift) parts.push("Shift");
+  parts.push(key);
+  return parts.join("+");
+}
 
 export function getWorkbarTool(kind: WorkbarToolKind): WorkbarToolDefinition {
   const tool = WORKBAR_TOOL_REGISTRY.find((candidate) => candidate.kind === kind);

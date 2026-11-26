@@ -69,11 +69,9 @@ test("invalid workspace query falls back to an interactive new task", async () =
 
 test("existing work opens only through canonical session routes", async () => {
   const app = await rendererSource("App.tsx");
-  const home = await rendererSource("pages/HomePage.tsx");
   assert.match(app, /path="session\/:sessionId"/u);
   assert.doesNotMatch(app, /task\/:runId|\bTaskPage\b/u);
-  assert.match(home, /latestRun\?\.sessionId/u);
-  assert.doesNotMatch(home, /workspaceHref\(`\/task\/\$\{latestRun\.id\}/u);
+  assert.doesNotMatch(app, /path="home"/u);
 });
 
 test("sidebar pending state includes prompts and is scoped by workspace plus session", async () => {

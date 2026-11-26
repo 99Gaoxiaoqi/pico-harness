@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { RuntimeContext } from "../../../apps/desktop/src/renderer/runtime-context.js";
+import { ArchiveUndoProvider } from "../../../apps/desktop/src/renderer/archive-undo.js";
 import { emptyData } from "../../../apps/desktop/src/renderer/model.js";
 import type { RuntimeStore } from "../../../apps/desktop/src/renderer/runtime.js";
 import { installRendererSsr } from "./renderer-ssr-fixture.js";
@@ -40,7 +41,11 @@ test("desktop sidebar renders the native new-task shortcut on Windows and macOS"
       createElement(
         MemoryRouter,
         null,
-        createElement(RuntimeContext.Provider, { value: store }, createElement(AppShell)),
+        createElement(
+          RuntimeContext.Provider,
+          { value: store },
+          createElement(ArchiveUndoProvider, null, createElement(AppShell)),
+        ),
       ),
     );
     assert.ok(html.includes(`<kbd class="sidebar-shortcut">${shortcut}</kbd>`));

@@ -14,6 +14,7 @@ import {
   FolderGit2,
   Gauge,
   Home,
+  List,
   MoreHorizontal,
   Network,
   PanelLeftClose,
@@ -38,6 +39,7 @@ import {
 } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { TaskSearchDialog } from "./TaskSearchDialog.js";
+import { useArchiveUndo } from "./archive-undo.js";
 import { PreviewBadge } from "./components.js";
 import { removePersistentDraft } from "./conversation/index.js";
 import type { ApprovalView, PromptView, RunView, SessionView, WorkspaceView } from "./model.js";
@@ -50,6 +52,7 @@ import {
 import { useRuntime } from "./runtime-context.js";
 import { formatRelative, isTerminalRun } from "./view-format.js";
 import {
+  SESSION_ARCHIVE_RUNNING_HINT,
   TEMPORARY_WORKSPACE_GROUP_LABEL,
   isActiveWorkspaceSession,
   newSessionHref,
@@ -164,23 +167,34 @@ export function AppShell() {
       { duration, easing },
     );
   }, [location.pathname]);
-  const handleArchiveSession = useCallback(
-    (session: SessionView) => {
-      const isRunning = data.runs.some(
+  const { offerArchiveUndo } = useArchiveUndo();
+  const sessionRunning = useCallback(
+    (session: SessionView) =>
+      data.runs.some(
         (run) =>
           run.workspacePath === session.workspacePath &&
           run.sessionId === session.id &&
           !isTerminalRun(run.status),
-      );
-      if (isRunning && !window.confirm("该会话正在运行，归档可能导致运行结果丢失。确认归档？")) {
-        return;
-      }
-      void actions.setSessionArchived(
+      ),
+    [data.runs],
+  );
+  const handleArchiveSession = useCallback(
+    async (session: SessionView) => {
+      // Archiving is reversible, so it never asks for confirmation. A running
+      // session stays guarded until it stops, with the same reason everywhere.
+      if (sessionRunning(session)) return;
+      const archived = await actions.setSessionArchived(
         { workspacePath: session.workspacePath, sessionId: session.id },
         true,
       );
+      if (archived) {
+        offerArchiveUndo(
+          { workspacePath: session.workspacePath, sessionId: session.id },
+          session.title,
+        );
+      }
     },
-    [actions, data.runs],
+    [actions, offerArchiveUndo, sessionRunning],
   );
   const handlePinSession = useCallback(
     (session: SessionView) => {
@@ -195,9 +209,7 @@ export function AppShell() {
     if (
       projectActionBusy ||
       project.sessions.length === 0 ||
-      !window.confirm(
-        `归档“${project.label}”的 ${project.sessions.length} 条聊天？归档后可在任务列表中恢复。`,
-      )
+      project.sessions.some((session) => sessionRunning(session))
     )
       return;
     setProjectActionBusy(true);
@@ -337,6 +349,16 @@ export function AppShell() {
               </kbd>
             </Link>
             <div className="sidebar__body">
+              <NavLink
+                className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}
+                to="/sessions"
+                end
+                aria-label="全部任务"
+                data-nav-link
+              >
+                <List aria-hidden="true" />
+                <span className="sidebar__label">全部任务</span>
+              </NavLink>
               <Link
                 className="nav-link"
                 to="/extensions/skills"
@@ -751,7 +773,7 @@ function SidebarTasks({
                   <DropdownMenuItem
                     icon={<Archive aria-hidden="true" />}
                     label="归档聊天"
-                    description={running ? "有聊天正在运行，结束后可归档" : undefined}
+                    description={running ? SESSION_ARCHIVE_RUNNING_HINT : undefined}
                     isDisabled={busy || running || group.sessions.length === 0}
                     onClick={() => void onArchiveProject(group)}
                   />
@@ -872,7 +894,8 @@ function SidebarSessionRow({
         <DropdownMenuItem
           icon={<Archive aria-hidden="true" />}
           label="归档"
-          isDisabled={busy}
+          description={running ? SESSION_ARCHIVE_RUNNING_HINT : undefined}
+          isDisabled={busy || running}
           onClick={archiveSession}
         />
         <DropdownMenuItem
@@ -939,7 +962,6 @@ function routeTitle(pathname: string): string {
   return (
     (
       {
-        "/": "开始",
         "/sessions": "会话",
         "/automations": "定时任务",
         "/review": "更改审阅",

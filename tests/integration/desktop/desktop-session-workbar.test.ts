@@ -32,7 +32,7 @@ test("desktop Workbar renders one accessible right panel with persistent tab pan
     }),
   );
 
-  assert.match(html, /aria-label="右侧任务工作栏"/u);
+  assert.match(html, /aria-label="任务工作栏"/u);
   assert.doesNotMatch(html, /底部任务工作栏|session-workbar-height/u);
   assert.equal((html.match(/role="tablist"/gu) ?? []).length, 1);
   assert.match(html, /role="tab"[^>]+aria-selected="true"/u);
@@ -63,7 +63,7 @@ test("desktop Workbar source exposes full Registry, context menu and keyboard al
   assert.deepEqual(
     WORKBAR_TOOL_REGISTRY.map(({ kind, label }) => ({ kind, label })),
     [
-      { kind: "side-chat", label: "侧边对话" },
+      { kind: "side-chat", label: "侧聊" },
       { kind: "review", label: "变更" },
       { kind: "terminal", label: "终端" },
       { kind: "browser", label: "浏览器" },

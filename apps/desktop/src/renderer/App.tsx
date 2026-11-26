@@ -19,13 +19,13 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { AppShell } from "./AppShell.js";
+import { ArchiveUndoProvider } from "./archive-undo.js";
 import { UserMemorySettingsPage } from "./pages/UserMemorySettingsPage.js";
 import { ProviderPage } from "./ProviderPage.js";
 import { Button, EmptyState, InlineNotice, PreviewBadge } from "./components.js";
 import { AutomationsPage } from "./pages/AutomationsPage.js";
 import { ConversationPage, NewTaskPage } from "./pages/ConversationPage.js";
 import { ExtensionsIndex, ExtensionsPage } from "./pages/ExtensionsPage.js";
-import { HomePage } from "./pages/HomePage.js";
 import { ReviewPage } from "./pages/ReviewPage.js";
 import { SessionsPage } from "./pages/SessionsPage.js";
 import {
@@ -88,9 +88,14 @@ function AppStateRouter() {
   return (
     <Routes>
       <Route path="/onboarding" element={<Onboarding />} />
-      <Route element={<AppShell />}>
+      <Route
+        element={
+          <ArchiveUndoProvider>
+            <AppShell />
+          </ArchiveUndoProvider>
+        }
+      >
         <Route index element={<Navigate replace to="/task/new" />} />
-        <Route path="home" element={<HomePage />} />
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="task/new" element={<NewTaskPage />} />
         <Route

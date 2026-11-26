@@ -13,6 +13,14 @@ import {
 } from "lucide-react";
 import { ArtifactPreview } from "./ArtifactPreview.js";
 import { artifactPreviewKind, artifactPreviewLimit } from "./artifact-preview-model.js";
+import { isMacPlatform, isWindowsPlatform } from "../platform.js";
+
+/** Cross-platform wording: macOS says Finder, Windows says File Explorer. */
+export function revealArtifactLabel(): string {
+  if (isWindowsPlatform()) return "在文件资源管理器中显示";
+  if (isMacPlatform()) return "在访达中显示";
+  return "打开所在文件夹";
+}
 
 export interface WorkbarArtifact {
   readonly id: string;
@@ -194,7 +202,7 @@ export function FilesWorkbarPanel({
                     )}
                     {onOpenArtifact && (
                       <DropdownMenuItem
-                        label="在访达中显示"
+                        label={revealArtifactLabel()}
                         icon={<ExternalLink aria-hidden="true" size={14} />}
                         onClick={() => onOpenArtifact(selected.id)}
                       />
