@@ -43,11 +43,20 @@ const number = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 const string = (value: unknown): string => (typeof value === "string" ? value : "");
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+/**
+ * Startup auto-recovery is best effort: a few bounded attempts with backoff.
+ * The user-visible state lives in `supervision` (startup_timeout/startup_failed)
+ * and the settings page offers an explicit retry; startup never prints an
+ * instruction to a console the user is not looking at.
+ */
+const STARTUP_RECOVERY_ATTEMPTS = 3;
+const STARTUP_RECOVERY_BACKOFF_MS = 1_000;
 
 /** The service owns persistence/process transitions; Renderer never receives control credentials. */
 export class RemoteManagementService {
   private tail: Promise<unknown> = Promise.resolve();
   private startupTimedOut = false;
+  private startupFailed = false;
   private readonly preferencePath: string;
   constructor(private readonly dependencies: RemoteManagementDependencies) {
     this.preferencePath = join(dependencies.preferencesDirectory, "mobile-connection.json");
@@ -85,7 +94,9 @@ export class RemoteManagementService {
         ? "registration_missing"
         : this.startupTimedOut && state.desiredRunning && !status
           ? "startup_timeout"
-          : undefined;
+          : this.startupFailed && state.desiredRunning && !status
+            ? "startup_failed"
+            : undefined;
     return {
       backend,
       desiredRunning: state.desiredRunning,
@@ -126,6 +137,43 @@ export class RemoteManagementService {
       await this.ensureRunning();
     });
   }
+  /**
+   * Startup recovery runs unattended, so it must never fail loudly or flap:
+   * - skip entirely when nothing was enabled or when no configuration exists
+   *   (fresh dev instances and machines without a phone keep a stale legacy
+   *   "enabled" preference but no `config.json`);
+   * - retry a bounded number of times with exponential backoff;
+   * - record the failure for `supervision()` and the settings page instead of
+   *   printing a user-facing instruction to the terminal.
+   */
+  async recoverOnStartup(): Promise<void> {
+    this.startupFailed = false;
+    try {
+      const state = await this.serviceState();
+      const activeRuntime = await readActiveGatewayRuntime(this.home);
+      if (!state.desiredRunning && !activeRuntime) return;
+      // A stale "enabled" intent without config.json has nothing to recover;
+      // keep cleanup of a stopped registration on its normal path.
+      if (state.desiredRunning && !(await this.dependencies.readConfiguration()).configured) return;
+      for (let attempt = 0; attempt < STARTUP_RECOVERY_ATTEMPTS; attempt++) {
+        try {
+          await this.restore();
+          return;
+        } catch {
+          if (!(await this.serviceState()).desiredRunning) return;
+          if (attempt === STARTUP_RECOVERY_ATTEMPTS - 1) {
+            this.startupFailed = true;
+            return;
+          }
+          await (this.dependencies.delay ?? waitForDelay)(
+            STARTUP_RECOVERY_BACKOFF_MS * 2 ** attempt,
+          );
+        }
+      }
+    } catch {
+      this.startupFailed = true;
+    }
+  }
   async snapshot(): Promise<RemoteManagementSnapshot> {
     const [enabled, configuration] = await Promise.all([
       this.serviceState().then((state) => state.desiredRunning),
@@ -142,7 +190,6 @@ export class RemoteManagementService {
         configuration: this.publicConfiguration(configuration),
         devices: [],
         pending: [],
-        ...(enabled ? { issue: "手机连接未运行，请重试开启。" } : {}),
       };
     }
     const [deviceResult, pendingResult] = await Promise.all([
@@ -223,6 +270,7 @@ export class RemoteManagementService {
   }
   private async ensureRunning(): Promise<void> {
     this.startupTimedOut = false;
+    this.startupFailed = false;
     try {
       await this.dependencies.control("status");
       return;

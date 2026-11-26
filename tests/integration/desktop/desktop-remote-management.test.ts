@@ -13,6 +13,7 @@ import {
 import { registerRemoteManagementIpc } from "../../../apps/desktop/src/main/remote-management-ipc.js";
 import { RemoteManagementService } from "../../../apps/desktop/src/main/remote-management-service.js";
 import { pairingQrDataUrl } from "../../../apps/desktop/src/main/pairing-qr.js";
+import { setGatewayDesiredRunning } from "@pico/remote-gateway/desktop";
 
 function ipcHarness(service: RemoteManagementService) {
   const handlers = new Map<
@@ -172,6 +173,44 @@ test("桌面手机连接通过可信桥接完成配置、唯一后台启动、�
   await new RemoteManagementService(dependencies).restore();
   assert.equal(spawns, 1);
   assert.ok(!calls.some((method) => method.includes("shutdown")));
+
+  // 自启动恢复：未配置直接跳过；配置后失败有界退避并转为设置页可重试状态。
+  const recoveryRoot = await mkdtemp(join(tmpdir(), "pico-remote-recovery-"));
+  t.after(() => rm(recoveryRoot, { recursive: true, force: true }));
+  let recoveryConfigured = false;
+  let recoverySpawns = 0;
+  const recoveryDelays: number[] = [];
+  const recoveryService = new RemoteManagementService({
+    preferencesDirectory: recoveryRoot,
+    readConfiguration: async () =>
+      recoveryConfigured
+        ? { configured: true, workspaces: [] }
+        : { configured: false, workspaces: [] },
+    configure: async () => undefined,
+    control: async () => {
+      throw new Error("unreachable");
+    },
+    spawn: async () => {
+      recoverySpawns++;
+      throw new Error("gateway missing");
+    },
+    delay: async (milliseconds) => {
+      recoveryDelays.push(milliseconds);
+    },
+    makeQr: pairingQrDataUrl,
+  });
+  await setGatewayDesiredRunning(recoveryRoot, true);
+  await recoveryService.recoverOnStartup();
+  assert.equal(recoverySpawns, 0);
+  assert.deepEqual(recoveryDelays, []);
+  recoveryConfigured = true;
+  await recoveryService.recoverOnStartup();
+  assert.equal(recoverySpawns, 3);
+  assert.deepEqual(recoveryDelays, [1_000, 2_000]);
+  const recoverySnapshot = await recoveryService.snapshot();
+  assert.equal(recoverySnapshot.enabled, true);
+  assert.equal(recoverySnapshot.running, false);
+  assert.equal(recoverySnapshot.supervision?.issueCode, "startup_failed");
 });
 
 test("手机管理拒绝非可信页面、旧邀请及多余字段，且不会把网关秘密放进错误响应", async (t) => {

@@ -51,7 +51,11 @@ export interface RemoteSupervisionSnapshot {
     readonly signal?: string | null;
     readonly buildId?: string;
   };
-  readonly issueCode?: "installation_missing" | "registration_missing" | "startup_timeout";
+  readonly issueCode?:
+    | "installation_missing"
+    | "registration_missing"
+    | "startup_timeout"
+    | "startup_failed";
 }
 export interface RemoteManagementSnapshot {
   readonly enabled: boolean;
