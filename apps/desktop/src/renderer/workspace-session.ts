@@ -11,6 +11,9 @@ export interface WorkspaceScopedItem {
 export const TEMPORARY_WORKSPACE_LABEL = "无项目";
 export const TEMPORARY_WORKSPACE_GROUP_LABEL = "未归属项目";
 
+/** One reason string for every disabled archive entry point. */
+export const SESSION_ARCHIVE_RUNNING_HINT = "任务运行中，停止后再归档";
+
 export interface WorkspaceLabelSource {
   readonly path: string;
   readonly name: string;

@@ -111,8 +111,6 @@ import {
 
 const CHOOSE_PROJECT_OPTION_VALUE = "__choose-project__";
 
-const TEMPORARY_PROJECT_OPTION_VALUE = "__temporary-project__";
-
 const PERMISSION_MODE_LABELS = {
   ask: "请求批准",
   auto: "帮我批准",
@@ -1554,34 +1552,24 @@ export function ConversationPage() {
                             <SelectField
                               name="workspace"
                               label="项目"
-                              value={
-                                workspace?.temporary
-                                  ? TEMPORARY_PROJECT_OPTION_VALUE
-                                  : workspacePath || ""
-                              }
+                              placeholder="无项目"
+                              value={workspace?.temporary ? "" : workspacePath || ""}
                               onValueChange={(nextWorkspacePath) => {
                                 if (nextWorkspacePath === CHOOSE_PROJECT_OPTION_VALUE) {
                                   void chooseProjectFolder();
                                   return;
                                 }
-                                if (nextWorkspacePath === TEMPORARY_PROJECT_OPTION_VALUE) return;
                                 changeNewTaskProject(nextWorkspacePath);
                               }}
                               options={[
-                                { value: "", label: "无项目" },
-                                { value: CHOOSE_PROJECT_OPTION_VALUE, label: "打开项目文件夹…" },
-                                ...(workspace?.temporary
-                                  ? [
-                                      {
-                                        value: TEMPORARY_PROJECT_OPTION_VALUE,
-                                        label: workspaceLabel,
-                                      },
-                                    ]
-                                  : []),
                                 ...projectWorkspaceOptions.map((workspace) => ({
                                   value: workspace.path,
                                   label: workspaceDisplayName(workspace.path, workspace),
                                 })),
+                                ...(projectWorkspaceOptions.length > 0
+                                  ? [{ type: "divider" as const }]
+                                  : []),
+                                { value: CHOOSE_PROJECT_OPTION_VALUE, label: "添加项目…" },
                               ]}
                             />
                           </div>

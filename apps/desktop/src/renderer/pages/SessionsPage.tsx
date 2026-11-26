@@ -3,11 +3,13 @@ import { TextField } from "../ui-controls.js";
 import { Archive, Code2, Folder, Plus, Search } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { useArchiveUndo } from "../archive-undo.js";
 import { Button, EmptyState, StatusPill } from "../components.js";
 import type { SessionView } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
-import { formatRelative } from "../view-format.js";
+import { formatRelative, isTerminalRun } from "../view-format.js";
 import {
+  SESSION_ARCHIVE_RUNNING_HINT,
   newSessionHref,
   sessionHref,
   workspaceDisplayName,
@@ -18,6 +20,7 @@ import {
 
 export function SessionsPage() {
   const { data, actions, busy } = useRuntime();
+  const { offerArchiveUndo } = useArchiveUndo();
   const workspacePath = workspacePathFromSearch(useLocation().search);
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -29,6 +32,11 @@ export function SessionsPage() {
         .toLowerCase()
         .includes(query.toLowerCase()),
   );
+  const toggleArchive = async (session: SessionView, archived: boolean) => {
+    const ref = { workspacePath: session.workspacePath, sessionId: session.id };
+    const changed = await actions.setSessionArchived(ref, !archived);
+    if (changed && !archived) offerArchiveUndo(ref, session.title);
+  };
   return (
     <div className="page-stack">
       <section className="page-intro">
@@ -72,29 +80,36 @@ export function SessionsPage() {
           <EmptyState title="没有匹配的会话" detail="尝试其他关键词，或显示已归档会话。" />
         ) : (
           <div className="session-list">
-            {sessions.map((session) => (
-              <SessionRow
-                key={workspaceSessionKey({
-                  workspacePath: session.workspacePath,
-                  sessionId: session.id,
-                })}
-                session={session}
-                action={
-                  <Button
-                    variant="quiet"
-                    disabled={busy === "session-state"}
-                    onClick={() =>
-                      void actions.setSessionArchived(
-                        { workspacePath: session.workspacePath, sessionId: session.id },
-                        session.status !== "archived",
-                      )
-                    }
-                  >
-                    {session.status === "archived" ? "恢复" : "归档"}
-                  </Button>
-                }
-              />
-            ))}
+            {sessions.map((session) => {
+              const archived = session.status === "archived";
+              const running =
+                !archived &&
+                data.runs.some(
+                  (run) =>
+                    run.workspacePath === session.workspacePath &&
+                    run.sessionId === session.id &&
+                    !isTerminalRun(run.status),
+                );
+              return (
+                <SessionRow
+                  key={workspaceSessionKey({
+                    workspacePath: session.workspacePath,
+                    sessionId: session.id,
+                  })}
+                  session={session}
+                  action={
+                    <Button
+                      variant="quiet"
+                      disabled={busy === "session-state" || running}
+                      title={running ? SESSION_ARCHIVE_RUNNING_HINT : undefined}
+                      onClick={() => void toggleArchive(session, archived)}
+                    >
+                      {archived ? "恢复" : "归档"}
+                    </Button>
+                  }
+                />
+              );
+            })}
           </div>
         )}
       </section>

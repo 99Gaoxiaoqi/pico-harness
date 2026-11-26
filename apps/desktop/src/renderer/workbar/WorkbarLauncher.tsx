@@ -1,7 +1,11 @@
 import { Button } from "../components.js";
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 
-import { WORKBAR_TOOL_REGISTRY, type WorkbarToolDefinition } from "./registry.js";
+import {
+  WORKBAR_TOOL_REGISTRY,
+  formatWorkbarShortcut,
+  type WorkbarToolDefinition,
+} from "./registry.js";
 import type { WorkbarToolKind } from "./types.js";
 
 export interface WorkbarLauncherAvailability {
@@ -101,7 +105,7 @@ export function WorkbarLauncher({
             <span className="session-workbar__launcher-copy">
               <span className="session-workbar__launcher-title">
                 <strong>{tool.label}</strong>
-                {tool.shortcut && <kbd>{tool.shortcut}</kbd>}
+                {tool.shortcut && <kbd>{formatWorkbarShortcut(tool.shortcut)}</kbd>}
               </span>
               <span>{tool.description}</span>
               {status.reason && (

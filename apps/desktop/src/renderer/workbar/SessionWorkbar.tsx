@@ -312,11 +312,11 @@ export function SessionWorkbar({
       style={rootStyle}
     >
       <IconButton
-        label={"展开右侧任务工作栏"}
+        label={"打开任务工作栏"}
         ref={restoreButtonRef}
         type="button"
         className="session-workbar-restore"
-        aria-label={"展开右侧任务工作栏"}
+        aria-label={"打开任务工作栏"}
         aria-controls={rootId}
         aria-expanded={!collapsed}
         hidden={!collapsed || !showRestoreButton}
@@ -331,13 +331,13 @@ export function SessionWorkbar({
         data-slot="session-workbar"
         data-dock="right"
         data-resizing={resizing || undefined}
-        aria-label={"右侧任务工作栏"}
+        aria-label={"任务工作栏"}
         hidden={collapsed}
       >
         <div
           className="session-workbar__resize-handle"
           role="separator"
-          aria-label={"调整右侧工作栏宽度"}
+          aria-label={"调整任务工作栏宽度"}
           aria-orientation="vertical"
           aria-valuemin={Math.min(WORKBAR_MIN_WIDTH, availableSize)}
           aria-valuemax={availableSize}
@@ -352,7 +352,7 @@ export function SessionWorkbar({
             <div
               className="session-workbar__tab-strip"
               role="tablist"
-              aria-label={"右侧已打开的任务面板"}
+              aria-label={"已打开的任务面板"}
               onDragOver={(event) => event.preventDefault()}
               onDrop={(event) => handleDrop(event, tabs.length)}
             >
@@ -455,10 +455,10 @@ export function SessionWorkbar({
                 <Plus aria-hidden="true" size={17} />
               </IconButton>
               <IconButton
-                label="收起右侧面板"
+                label="收起任务工作栏"
                 type="button"
                 className="session-workbar__icon-button"
-                aria-label="收起右侧面板"
+                aria-label="收起任务工作栏"
                 aria-controls={rootId}
                 aria-expanded={!collapsed}
                 onClick={handleCollapse}
