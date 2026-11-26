@@ -16,7 +16,7 @@ export class WorkbarReviewConflictError extends Error {
     readonly stagedRevision: string,
     readonly unstagedRevision: string,
   ) {
-    super(`Git 快照版本冲突：staged ${stagedRevision}，unstaged ${unstagedRevision}`);
+    super("文件内容已变化，请重新加载审阅。");
     this.name = "WorkbarReviewConflictError";
   }
 }
@@ -212,7 +212,7 @@ export async function loadConsistentReviewSnapshot(
     }
     lastConflict = new WorkbarReviewConflictError(staged.revision, unstaged.revision);
   }
-  throw lastConflict ?? new Error("Git 快照不可用。");
+  throw lastConflict ?? new Error("读取审阅快照失败，请重试。");
 }
 
 export async function loadReviewDiff(

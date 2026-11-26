@@ -46,7 +46,9 @@ test("健康页区分配置与验证，高级诊断只列正式项目和当前�
     ),
   );
   assert.match(html, /已配置/);
-  assert.match(html, /未验证/);
+  assert.match(html, /连接验证/);
+  assert.match(html, /测试全部连接|添加连接/);
+  assert.doesNotMatch(html, /未验证/);
   assert.doesNotMatch(html, /最近一次任务失败|其他项目 MCP/);
   assert.match(html, /用户 MCP/);
   assert.match(html, /<details[^>]*><summary>高级诊断<\/summary>/);

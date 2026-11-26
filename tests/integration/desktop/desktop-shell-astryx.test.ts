@@ -161,6 +161,7 @@ const writes = [];
 let failArchive = false;
 let failUnregister = false;
 const runtime = {
+  connection: { kind: "ready" },
   data: scenarioData, preview: false, busy: false, message: "",
   actions: {
     setSessionPinned: async (...args) => writes.push(["pin", ...args]),

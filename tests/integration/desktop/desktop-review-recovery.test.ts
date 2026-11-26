@@ -211,9 +211,9 @@ async function run(){
  await mount();
  await click("批准更改");
  check(writes[3].target.idempotencyKey!==writes[2].target.idempotencyKey,"A new intent gets a new UUID");
- await click("Rewind");
- await click("预览 Rewind");
- await click("确认 Rewind");
+ await click("回退更改");
+ await click("预览回退（Rewind）");
+ await click("确认回退更改");
  check(document.getElementById("location").textContent.startsWith("/session/rewound-session?"),"Rewind follows returned Session target");
  return "PASS: review recovery and rewind navigation";
 }
