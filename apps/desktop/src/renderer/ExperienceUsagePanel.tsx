@@ -94,9 +94,17 @@ export function ExperienceUsagePanel({
           <summary>
             <span>经验使用记录</span>
             <span>{carried} 条已引用</span>
-            {pending > 0 && <span>{pending} 条{deliveryLabels.pending}</span>}
+            {pending > 0 && (
+              <span>
+                {pending} 条{deliveryLabels.pending}
+              </span>
+            )}
             {historical > 0 && <span>{historical} 条旧记录</span>}
-            {unconfirmed > 0 && <span>{unconfirmed} 条{deliveryLabels.unknown}</span>}
+            {unconfirmed > 0 && (
+              <span>
+                {unconfirmed} 条{deliveryLabels.unknown}
+              </span>
+            )}
           </summary>
           <div className="task-experience__summary-content">
             <p>
@@ -441,9 +449,7 @@ function UseCard({
       {current.referenceContent && (
         <p className="task-experience__content">{referenceBody(current.referenceContent)}</p>
       )}
-      {unconfirmed && (
-        <p>{deliveryLabels.unknown}，独立执行结果仍保留，但不能归因于这条经验。</p>
-      )}
+      {unconfirmed && <p>{deliveryLabels.unknown}，独立执行结果仍保留，但不能归因于这条经验。</p>}
       {!unconfirmed && current.validationScope !== "unknown" && (
         <p>本次结果只验证列明范围内的操作，不代表经验正文、根因或整个任务已验证。</p>
       )}

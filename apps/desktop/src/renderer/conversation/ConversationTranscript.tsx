@@ -726,14 +726,11 @@ function renderDefaultItem(
             <SearchCode aria-hidden="true" />
             <div>
               <span className="conversation-kicker">
-                代码探索 · {discoveryDepthLabels[item.depth]} ·{" "}
-                {discoveryPhaseLabels[item.phase]}
+                代码探索 · {discoveryDepthLabels[item.depth]} · {discoveryPhaseLabels[item.phase]}
               </span>
               <strong>{item.objective}</strong>
             </div>
-            <span className="conversation-item-state">
-              {discoveryStatusLabels[item.status]}
-            </span>
+            <span className="conversation-item-state">{discoveryStatusLabels[item.status]}</span>
           </header>
           <p className="conversation-execution-meta">
             {item.inspectedFiles} 个文件 · {item.evidenceCount} 条证据 · {item.openQuestions}{" "}

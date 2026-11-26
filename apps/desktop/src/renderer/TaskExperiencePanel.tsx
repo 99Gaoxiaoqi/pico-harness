@@ -1790,7 +1790,9 @@ function ExperienceReference({
           <span>{excluded || reference.excluded ? "本次已排除参考" : "本次参考"}</span>
         </span>
       </header>
-      <p>旧记录未保存完整的送达与验证范围；历史记录或未限定范围的验证，不能证明建议全文或最终回答正确。</p>
+      <p>
+        旧记录未保存完整的送达与验证范围；历史记录或未限定范围的验证，不能证明建议全文或最终回答正确。
+      </p>
       {reference.referenceContent ? (
         <p>{reference.referenceContent}</p>
       ) : current?.contentVersion === reference.contentVersion ? (
