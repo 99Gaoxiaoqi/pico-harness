@@ -30,6 +30,7 @@ import type {
 import { copyText } from "../clipboard.js";
 import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
 import { MarkdownText, referencedMediaIds } from "./MarkdownText.js";
+import { StreamingMarkdownText } from "./StreamingMarkdownText.js";
 import { MediaProvider, MediaPreview, type MediaScope } from "./MediaPreview.js";
 import { loadedAgentTools } from "./agent-capability.js";
 import { WebSearchRecord } from "./WebSearchRecord.js";
@@ -898,16 +899,29 @@ export function ConversationTranscript({
   label = "会话记录",
   emptyState,
   onOpenItem,
-  renderText = (text, item) => (
-    <MarkdownText
-      text={text}
-      dim={item.kind === "thinking"}
-      previewHtmlArtifacts={item.kind === "assistantMessage"}
-      media={
-        item.kind === "userMessage" || item.kind === "assistantMessage" ? item.media : undefined
-      }
-    />
-  ),
+  renderText = (text, item) => {
+    const assistant = item.kind === "assistantMessage";
+    const streaming = (assistant || item.kind === "thinking") && item.streaming === true;
+    if (streaming) {
+      return (
+        <StreamingMarkdownText
+          text={text}
+          streaming
+          dim={item.kind === "thinking"}
+          previewHtmlArtifacts={assistant}
+          media={assistant ? item.media : undefined}
+        />
+      );
+    }
+    return (
+      <MarkdownText
+        text={text}
+        dim={item.kind === "thinking"}
+        previewHtmlArtifacts={assistant}
+        media={item.kind === "userMessage" || assistant ? item.media : undefined}
+      />
+    );
+  },
   renderItem,
   onEditUserMessage,
   onQuoteSelection,

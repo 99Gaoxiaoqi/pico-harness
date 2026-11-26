@@ -1326,6 +1326,49 @@
   font-size: 12px;
 }
 
+/* 流式块渲染：包装层不生成盒模型，块间距/首尾外边距与一次性渲染保持一致。 */
+.streaming-markdown__block {
+  display: contents;
+}
+
+.streaming-markdown > .streaming-markdown__block:first-child > :first-child {
+  margin-top: 0;
+}
+
+.streaming-markdown > .streaming-markdown__block:last-child > :last-child {
+  margin-bottom: 0;
+}
+
+/* 模块的块解析输出 <pre><code>；代码块外观与 .desktop-markdown__code 对齐。 */
+.streaming-markdown pre {
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--conversation-line);
+  border-radius: 8px;
+  background: var(--conversation-bg-subtle);
+  color: var(--conversation-ink);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.streaming-markdown pre code {
+  padding: 0;
+  background: transparent;
+  font-size: inherit;
+}
+
+.streaming-markdown .streaming-markdown__image-placeholder {
+  color: var(--conversation-ink-muted);
+  font-style: italic;
+}
+
+.streaming-markdown .streaming-markdown__blocked-link {
+  color: var(--conversation-ink-muted);
+  text-decoration: line-through;
+}
+
 /* Process, reasoning and tool disclosures share the same quiet reading grid. */
 .conversation-message .desktop-markdown,
 .conversation-thinking .desktop-markdown {
