@@ -184,10 +184,10 @@ test("deleting a locally stored provider credential requires confirmation", asyn
     "const handleDelete = async () =>",
     "if (!provider) return null;",
   );
-  assert.match(handleDelete, /window\.confirm/u);
+  assert.match(handleDelete, /requestConfirm/u);
   assert.match(handleDelete, /删除后/u);
   assert.ok(
-    handleDelete.indexOf("window.confirm") < handleDelete.indexOf("onDelete(provider.id"),
+    handleDelete.indexOf("requestConfirm") < handleDelete.indexOf("onDelete(provider.id"),
     "The irreversible action must only run after confirmation",
   );
 });

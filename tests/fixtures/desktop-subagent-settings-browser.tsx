@@ -8,6 +8,7 @@ import type {
   RuntimeSubagentSettingsSnapshot,
 } from "@pico/protocol";
 import { SubagentSettingsPage } from "../../apps/desktop/src/renderer/pages/SubagentSettingsPage.js";
+import { ConfirmDialogHost } from "../../apps/desktop/src/renderer/confirm-dialog.js";
 
 Object.assign(globalThis, { React, IS_REACT_ACT_ENVIRONMENT: true });
 const target = document.getElementById("app")!;
@@ -141,7 +142,32 @@ function firstPreset() {
   return value;
 }
 async function mount(initial: RuntimeSubagentSettingsSnapshot) {
-  await act(async () => root.render(<Harness key={Math.random()} initial={initial} />));
+  await act(async () =>
+    root.render(
+      <>
+        <Harness key={Math.random()} initial={initial} />
+        <ConfirmDialogHost />
+      </>,
+    ),
+  );
+}
+
+async function confirmDecision(label: "取消" | "删除") {
+  let dialog: HTMLDialogElement | null = null;
+  for (let attempt = 0; attempt < 50 && !dialog; attempt += 1) {
+    dialog = document.querySelector<HTMLDialogElement>("dialog.confirm-dialog[open]");
+    if (!dialog) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 0);
+      await act(async () => promise);
+    }
+  }
+  check(dialog, "删除操作必须使用应用内确认对话框");
+  const action = [...dialog.querySelectorAll("button")].find(
+    (item) => item.textContent?.trim() === label,
+  );
+  check(action, `Missing confirmation action: ${label}`);
+  await act(async () => action.click());
 }
 
 async function main() {
@@ -237,12 +263,12 @@ async function main() {
     "List toggle must persist using new revision",
   );
   await click("配置 Renamed");
-  window.confirm = () => false;
   const beforeCancelDelete = writes.length;
   await click("删除子 Agent");
+  await confirmDecision("取消");
   check(writes.length === beforeCancelDelete, "Cancelled deletion must not write");
-  window.confirm = () => true;
   await click("删除子 Agent");
+  await confirmDecision("删除");
   check(
     latest().presets.length === 0 && document.activeElement === button("新建子 Agent"),
     "Deletion must return to empty list and focus add",

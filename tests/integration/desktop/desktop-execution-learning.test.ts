@@ -10,6 +10,7 @@ import {act,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {MemoryRouter,useNavigate,useLocation} from 'react-router-dom';
 import {MemoryPage} from './apps/desktop/src/renderer/MemoryPage.tsx';
+import {ConfirmDialogHost} from './apps/desktop/src/renderer/confirm-dialog.tsx';
 import {previewData} from './apps/desktop/src/renderer/fixture.ts';
 import {PicoTheme} from './apps/desktop/src/renderer/astryx-provider.tsx';
 globalThis.IS_REACT_ACT_ENVIRONMENT=true;
@@ -41,7 +42,7 @@ const root=createRoot(document.getElementById('app'));const text=()=>document.bo
 const button=label=>[...document.querySelectorAll('button')].find(n=>n.textContent===label);
 const click=async(selector)=>act(async()=>document.querySelector(selector).click());
 (async()=>{
- await act(async()=>root.render(<PicoTheme><MemoryRouter initialEntries={['/memory?tab=pending']}><Host/><Navigation/></MemoryRouter></PicoTheme>));
+ await act(async()=>root.render(<PicoTheme><MemoryRouter initialEntries={['/memory?tab=pending']}><Host/><Navigation/></MemoryRouter><ConfirmDialogHost/></PicoTheme>));
  check(document.querySelectorAll('[role=tab]').length===3&&document.querySelector('#memory-tab-pending .memory-tab__count').textContent==='1','one common review queue counts only generic proposals');
  check(!text().includes('隐藏的原生候选')&&nativeCalls===0,'no internal candidate is displayed, counted or requested');
  check(text().includes('自动学习已关闭')&&text().includes('记忆召回已关闭'),'disabled settings preserve review and history');
@@ -59,8 +60,12 @@ const click=async(selector)=>act(async()=>document.querySelector(selector).click
  check(record&&record.textContent.includes('冻结的原生执行目标')&&record.textContent.includes('不代表经验正文、根因或整个任务已验证'),'shared history shows the exact verification boundary');
  await act(async()=>document.querySelector('#memory-native-saved button[aria-label^="归档"]').click());
  check(saved.lifecycleState==='archived'&&document.querySelector('#memory-tab-archived').getAttribute('aria-selected')==='true','archive stays available for historical native memory');
- window.confirm=()=>true;
  await act(async()=>document.querySelector('#memory-native-saved button[aria-label^="删除"]').click());
+ const deleteDialog=[...document.querySelectorAll('dialog.confirm-dialog[open]')][0];
+ check(deleteDialog,'deleting saved memory asks for in-app confirmation');
+ const confirmDelete=[...deleteDialog.querySelectorAll('button')].find(b=>b.textContent==='删除');
+ check(confirmDelete,'confirmation offers the delete action');
+ await act(async()=>confirmDelete.click());
  check(!saved&&updates.length===2&&document.querySelector('[data-use-id="historic-use"]'),'deleting saved memory preserves usage history');
  check(nativeCalls===0,'management uses no retired candidate RPC');
  await act(async()=>root.unmount());await fetch('/result',{method:'POST',body:'PASS: unified experience management'});
