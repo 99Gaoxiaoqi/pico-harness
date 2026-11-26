@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { FilesPanelController } from "./FilesPanelController.js";
 import { GraphPanelController } from "./GraphPanelController.js";
 import { InspectorPanelController } from "./InspectorPanelController.js";
@@ -39,7 +40,11 @@ export type { WorkbarResourceGate } from "./useResourceFrame.js";
 export type { WorkbarPanelHostKind, WorkbarPanelHostProps } from "./workbar-panel-contract.js";
 export { invokeWorkbarRuntime, WorkbarPanelRuntimeError } from "./workbar-runtime.js";
 
-export function WorkbarPanelHost(props: WorkbarPanelHostProps) {
+/**
+ * 工作栏面板与流式会话提交解耦：RuntimeStore 每个流式增量都会重渲整棵树，
+ * 面板的可见数据（工作区/会话/激活态）此时并未变化，比较 props 即可整体跳过。
+ */
+export const WorkbarPanelHost = memo(function WorkbarPanelHost(props: WorkbarPanelHostProps) {
   const key = `${props.workspacePath}:${props.sessionId}:${props.instanceId}`;
   switch (props.kind) {
     case "inspector":
@@ -55,4 +60,4 @@ export function WorkbarPanelHost(props: WorkbarPanelHostProps) {
     case "graph":
       return <GraphPanelController key={key} {...props} />;
   }
-}
+});
