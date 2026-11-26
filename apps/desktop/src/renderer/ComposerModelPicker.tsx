@@ -147,7 +147,7 @@ export function ComposerModelPicker({
         className="composer-model-trigger pico-page-control"
         onClick={onConfigure}
         isDisabled={locked || readOnly}
-        tooltip="添加模型厂商"
+        tooltip="选择模型厂商并添加 API Key"
       >
         <Settings aria-hidden="true" />
         <span>配置模型</span>

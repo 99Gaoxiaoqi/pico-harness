@@ -291,7 +291,7 @@ function ProviderSetup({
   return (
     <section aria-labelledby="provider-setup-title">
       <div className="provider-flow-heading">
-        <IconButton label="返回服务商列表" disabled={busy} onClick={onBack}>
+        <IconButton label="返回连接列表" disabled={busy} onClick={onBack}>
           <ArrowLeft size={16} />
         </IconButton>
         <ProviderMark preset={preset} />
@@ -437,7 +437,7 @@ function ProviderSetup({
           {preset.protocol === "openai" && (
             <div className="settings-field provider-discovery-toggle">
               <CheckboxField
-                label="允许获取服务商模型列表"
+                label="允许从连接获取模型列表"
                 labelHidden={false}
                 checked={discoverModels}
                 onCheckedChange={(checked) => setDiscoverModels(checked)}
@@ -463,7 +463,7 @@ function ProviderSetup({
                 {step === "models" ? (anonymous ? "连接设置" : "上一步") : "取消"}
               </Button>
               <Button type="submit" variant="primary" disabled={blocked}>
-                {busy ? "正在保存…" : step === "credentials" ? "下一步" : "保存供应商"}
+                {busy ? "正在保存…" : step === "credentials" ? "下一步" : "保存连接"}
               </Button>
             </>
           )}

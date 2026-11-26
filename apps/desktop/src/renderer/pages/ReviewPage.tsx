@@ -346,7 +346,7 @@ export function ReviewPage() {
               </div>
               <Button onClick={() => setRewindOpen((value) => !value)}>
                 <History aria-hidden="true" size={15} />
-                Rewind
+                回退更改
               </Button>
             </header>
             {rewindOpen && (!rewindPreview || rewindPreview.key === reviewKey) && (
@@ -383,7 +383,7 @@ export function ReviewPage() {
                           });
                     }}
                   >
-                    确认 Rewind
+                    确认回退更改
                   </Button>
                 ) : (
                   <Button
@@ -397,7 +397,7 @@ export function ReviewPage() {
                           );
                     }}
                   >
-                    预览 Rewind
+                    预览回退（Rewind）
                   </Button>
                 )}
               </div>

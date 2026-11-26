@@ -111,12 +111,6 @@ import {
 
 const CHOOSE_PROJECT_OPTION_VALUE = "__choose-project__";
 
-const PERMISSION_MODE_LABELS = {
-  ask: "请求批准",
-  auto: "帮我批准",
-  "full-access": "完全访问权限",
-} as const;
-
 const REASONING_LEVEL_LABELS: Readonly<Record<string, string>> = {
   off: "关闭",
   minimal: "最少",
@@ -414,6 +408,9 @@ export function ConversationPage() {
     message?.startsWith("Legacy session-centric (JSONL) workspace storage exists:") &&
     message.includes(`/workspaces/${workspaceName(workspacePath)}-`),
   );
+  const legacyStoragePath = legacyStorageBlocked
+    ? message?.match(/exists: (.+?); the SQLite storage era/u)?.[1]
+    : undefined;
   const workspaceReady = Boolean(
     workspacePath && data.workspacePath === workspacePath && data.trusted && !legacyStorageBlocked,
   );
@@ -1520,7 +1517,7 @@ export function ConversationPage() {
                       : !workspacePath
                         ? "向 Pico 发送消息…"
                         : legacyStorageBlocked
-                          ? "这个项目需要先迁移旧版会话数据…"
+                          ? "这个项目需要先迁移旧版会话数据，请按下方提示处理"
                           : !workspaceReady
                             ? "正在准备项目…"
                             : "向 Pico 发送消息…"
@@ -1607,7 +1604,6 @@ export function ConversationPage() {
                                 <SelectField
                                   name="initial-permission-mode"
                                   label="权限模式"
-                                  title={`权限：${PERMISSION_MODE_LABELS[newTaskSettings.permissionMode ?? "ask"]}`}
                                   value={newTaskSettings.permissionMode ?? "ask"}
                                   onValueChange={(value) =>
                                     updateNewTaskSettings({
@@ -1615,9 +1611,9 @@ export function ConversationPage() {
                                     })
                                   }
                                   options={[
-                                    { value: "ask", label: "权限：请求批准" },
-                                    { value: "auto", label: "权限：帮我批准" },
-                                    { value: "full-access", label: "权限：完全访问权限" },
+                                    { value: "ask", label: "请求批准" },
+                                    { value: "auto", label: "帮我批准" },
+                                    { value: "full-access", label: "完全访问" },
                                   ]}
                                 />
                               </div>
@@ -1695,7 +1691,6 @@ export function ConversationPage() {
                             <SelectField
                               name="permission-mode"
                               label="权限模式"
-                              title={`权限：${PERMISSION_MODE_LABELS[conversation.settings.permissionMode]}`}
                               value={conversation.settings.permissionMode}
                               disabled={Boolean(activeRun) || Boolean(busy)}
                               onValueChange={(value) =>
@@ -1704,9 +1699,9 @@ export function ConversationPage() {
                                 })
                               }
                               options={[
-                                { value: "ask", label: "权限：请求批准" },
-                                { value: "auto", label: "权限：帮我批准" },
-                                { value: "full-access", label: "权限：完全访问权限" },
+                                { value: "ask", label: "请求批准" },
+                                { value: "auto", label: "帮我批准" },
+                                { value: "full-access", label: "完全访问" },
                               ]}
                             />
                           </div>
@@ -1953,10 +1948,42 @@ export function ConversationPage() {
                     <span className="brand-mark brand-mark--large" role="img" aria-label="Pico" />
                     <h2>{newTaskGreeting()}</h2>
                     {legacyStorageBlocked && (
-                      <InlineNotice tone="warning">
-                        这个项目仍包含旧版 JSONL 会话数据。Pico
-                        不会自动删除或混写这些历史；请先完成迁移，再开始新任务。
-                      </InlineNotice>
+                      <>
+                        <InlineNotice tone="warning">
+                          <strong>这个项目仍包含旧版会话数据</strong>
+                          <br />
+                          Pico 不会自动删除或混写这些历史。将旧数据目录移出 Pico
+                          存储位置后重新加载，即可开始新任务。
+                          {legacyStoragePath && (
+                            <>
+                              <br />
+                              <code>{legacyStoragePath}</code>
+                            </>
+                          )}
+                        </InlineNotice>
+                        <div className="button-row">
+                          {legacyStoragePath && (
+                            <>
+                              <Button
+                                onClick={() =>
+                                  void copyText(legacyStoragePath).then(
+                                    () => actions.showMessage?.("已复制旧数据路径。"),
+                                    () => actions.showMessage?.("复制失败，请手动选择路径。"),
+                                  )
+                                }
+                              >
+                                复制旧数据路径
+                              </Button>
+                              <Button onClick={() => void actions.openWorkspace(legacyStoragePath)}>
+                                打开旧数据目录
+                              </Button>
+                            </>
+                          )}
+                          <Button variant="quiet" onClick={() => navigate("/settings/data")}>
+                            查看数据位置
+                          </Button>
+                        </div>
+                      </>
                     )}
                   </div>
                 )

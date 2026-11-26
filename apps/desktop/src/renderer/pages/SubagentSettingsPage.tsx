@@ -13,6 +13,7 @@ import {
 } from "@pico/protocol";
 import { ArrowLeft, Bot, ChevronRight, Plus } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { Button, EmptyState, InlineNotice } from "../components.js";
 import { requestConfirm } from "../confirm-dialog.js";
 import {
@@ -459,7 +460,7 @@ function SubagentPresetEditor({
                 ? [
                     {
                       value: draft.connectionSlug,
-                      label: draft.connectionSlug + "· 连接已删除",
+                      label: `${draft.connectionSlug} · 连接已删除`,
                       disabled: true,
                     },
                   ]
@@ -473,7 +474,11 @@ function SubagentPresetEditor({
               })),
             ]}
           />
-          {usableConnections.length === 0 && <small>请先在模型设置中添加并启用连接。</small>}
+          {usableConnections.length === 0 && (
+            <small>
+              请先在模型设置中添加并启用连接。<Link to="/settings/models">去添加连接</Link>
+            </small>
+          )}
           {errorNode("connection")}
         </div>
         <div className="settings-field">
@@ -491,7 +496,7 @@ function SubagentPresetEditor({
             options={[
               ...(!draft.model ? [{ value: "", label: "请选择模型" }] : []),
               ...(draft.model && !validModel
-                ? [{ value: draft.model, label: draft.model + "· 模型不可用", disabled: true }]
+                ? [{ value: draft.model, label: `${draft.model} · 模型不可用`, disabled: true }]
                 : []),
               ...models.map((item) => ({ value: item.id, label: item.id })),
             ]}

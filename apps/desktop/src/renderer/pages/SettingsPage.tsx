@@ -6,7 +6,9 @@ import { Button, InlineNotice, StatusPill, WorkspaceModeBadge } from "../compone
 import { requestConfirm } from "../confirm-dialog.js";
 import { useRuntime } from "../runtime-context.js";
 import type { DesktopDiagnosticReport } from "../runtime.js";
+import type { ProviderView } from "../model.js";
 import { workspaceDisplayName } from "../workspace-session.js";
+import { formatRelative } from "../view-format.js";
 import { defaultModelWebSearch } from "../web-search.js";
 import { copyText } from "../clipboard.js";
 import { ExternalTaskImportPanel } from "./ExternalTaskImportPanel.js";
@@ -354,8 +356,88 @@ export function WorkspaceSettingsPage() {
   );
 }
 
+type ConnectionTestRecord = {
+  readonly ok: boolean;
+  readonly at: number;
+};
+
+const CONNECTION_TESTS_STORAGE_KEY = "pico.health.connection-tests";
+
+function readConnectionTests(): Readonly<Record<string, ConnectionTestRecord>> {
+  try {
+    const parsed: unknown = JSON.parse(
+      window.localStorage.getItem(CONNECTION_TESTS_STORAGE_KEY) ?? "{}",
+    );
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, ConnectionTestRecord] => {
+        const record = entry[1] as Partial<ConnectionTestRecord> | null;
+        return typeof record?.ok === "boolean" && typeof record.at === "number";
+      }),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function connectionTestTarget(provider: ProviderView, defaultRouteId?: string): string | undefined {
+  const catalog = provider.availableModels ?? provider.models;
+  const disabled = new Set(provider.disabledModels ?? []);
+  const enabled = catalog.filter((model) => !disabled.has(model));
+  return enabled.find((model) => `${provider.id}/${model}` === defaultRouteId) ?? enabled[0];
+}
+
+function connectionTestSummary(
+  providers: readonly ProviderView[],
+  tests: Readonly<Record<string, ConnectionTestRecord>>,
+): string {
+  const tested = providers.flatMap((provider) => {
+    const test = tests[provider.id];
+    return test ? [`${provider.id} ${test.ok ? "正常" : "失败"} · ${formatRelative(test.at)}`] : [];
+  });
+  if (tested.length > 0) return `上次测试：${tested.join("；")}`;
+  return providers.length === 0 ? "还没有可测试的连接" : "尚未测试";
+}
+
 export function SystemSettingsPage() {
-  const { data, actions, busy, connection } = useRuntime();
+  const { data, actions, busy, connection, preview } = useRuntime();
+  const providers = data.providerConfig.providers;
+  const defaultRouteId =
+    data.providerConfig.userDefaults.modelRouteId ?? data.providerConfig.defaultModelRouteId;
+  const firstProvider = providers[0];
+  const [connectionTests, setConnectionTests] = useState(readConnectionTests);
+  const [testingAll, setTestingAll] = useState(false);
+  const runConnectionTests = async () => {
+    setTestingAll(true);
+    try {
+      const targets = providers.flatMap((provider) => {
+        const model = connectionTestTarget(provider, defaultRouteId);
+        return model ? [{ provider, model }] : [];
+      });
+      const results = await Promise.all(
+        targets.map(async ({ provider, model }) => {
+          const record = await actions.testProviderConnection(provider.id, model).then(
+            (result): ConnectionTestRecord => ({ ok: result.ok, at: Date.now() }),
+            (): ConnectionTestRecord => ({ ok: false, at: Date.now() }),
+          );
+          return [provider.id, record] as const;
+        }),
+      );
+      setConnectionTests((current) => {
+        const next = { ...current, ...Object.fromEntries(results) };
+        if (!preview) {
+          try {
+            window.localStorage.setItem(CONNECTION_TESTS_STORAGE_KEY, JSON.stringify(next));
+          } catch {
+            // The in-memory result still applies when storage is unavailable.
+          }
+        }
+        return next;
+      });
+    } finally {
+      setTestingAll(false);
+    }
+  };
   const [diagnosticReport, setDiagnosticReport] = useState<DesktopDiagnosticReport>();
   const [diagnosticWorkspacePath, setDiagnosticWorkspacePath] = useState(
     () =>
@@ -396,13 +478,30 @@ export function SystemSettingsPage() {
           >
             <StatusPill status={connection.kind === "ready" ? "ready" : "attention"} />
           </SettingRow>
-          <SettingRow
-            title="连接验证"
-            detail="此页不发起模型请求；已配置或凭证已保存不代表连接测试通过。"
-          >
-            <span className="health-status-text">未验证</span>
+          <SettingRow title="连接验证" detail={connectionTestSummary(providers, connectionTests)}>
+            <div className="settings-data-actions">
+              {firstProvider ? (
+                <>
+                  {!providers.some((provider) => connectionTests[provider.id]) && (
+                    <Link className="button" to={`/settings/models/${firstProvider.id}`}>
+                      去测试
+                    </Link>
+                  )}
+                  <Button
+                    disabled={Boolean(busy) || testingAll}
+                    onClick={() => void runConnectionTests()}
+                  >
+                    {testingAll ? "正在测试…" : "测试全部连接"}
+                  </Button>
+                </>
+              ) : (
+                <Link className="button" to="/settings/models">
+                  添加连接
+                </Link>
+              )}
+            </div>
           </SettingRow>
-          <SettingRow title="模型连接" detail="只根据当前已加载的模型路由判断，不执行网络探测">
+          <SettingRow title="模型连接" detail="只根据当前已加载的模型路由判断，不自动探测">
             {data.providerConfig.providers.length > 0 ? (
               <span className="health-status-text health-status-text--ready">已配置</span>
             ) : (
@@ -439,10 +538,10 @@ export function SystemSettingsPage() {
                     ? "缺少凭证，此连接可能无法调用"
                     : provider.credentialStatus === "unsupported"
                       ? "当前凭证方式不受支持"
-                      : "已读取凭证配置，尚未在此页验证网络连接"
+                      : "已读取凭证配置，可用上方“测试全部连接”验证"
               }
             >
-              <Link className="button" to="/settings/models">
+              <Link className="button" to={`/settings/models/${provider.id}`}>
                 {provider.auth === "none"
                   ? "无需凭证"
                   : provider.credentialStatus === "missing" ||
