@@ -1,5 +1,5 @@
 import { defineConfig } from "vite";
-import { nodeBuiltinExternal } from "./vite.node-externals.js";
+import { nodeSqliteExternal } from "./vite.node-externals.js";
 import { copyDesktopRuntimeResources } from "./desktop-runtime-resources.js";
 
 const bundledModuleUrlGlobal = "__PICO_DAEMON_IMPORT_META_URL__";
@@ -22,7 +22,7 @@ export default defineConfig({
       // Keep native addon and parser WASM package boundaries intact. Development
       // resolves them from the workspace; packaging copies dependencies beside
       // the daemon bundle during Electron's dependency-copy phase.
-      external: [nodeBuiltinExternal, "fs-native-extensions", "node-pty", "web-tree-sitter"],
+      external: [nodeSqliteExternal, "fs-native-extensions", "node-pty", "web-tree-sitter"],
       output: {
         banner: `globalThis.${bundledModuleUrlGlobal} = require("node:url").pathToFileURL(__filename).href;`,
         entryFileNames: "daemon.cjs",
