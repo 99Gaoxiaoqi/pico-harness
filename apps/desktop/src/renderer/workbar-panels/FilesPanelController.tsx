@@ -14,6 +14,29 @@ import { artifactPreviewKind, artifactPreviewLimit } from "./artifact-preview-mo
 
 const ARTIFACT_CHUNK_BYTES = 32 * 1024;
 
+/** Internal signal: the artifact changed underneath us; reload once, then offer retry. */
+class ArtifactReloadRequiredError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = "ArtifactReloadRequiredError";
+  }
+}
+
+/** Internal signal: the Runtime returned a payload the panel cannot trust. */
+class ArtifactPayloadError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = "ArtifactPayloadError";
+  }
+}
+
+/** User-facing copy for files panel failures; raw details stay in the diagnostic copy. */
+export function filesPanelErrorMessage(cause: unknown): string {
+  if (cause instanceof ArtifactReloadRequiredError) return "文件内容已变化，正在重新加载…";
+  if (cause instanceof ArtifactPayloadError) return "读取产物失败，请重试。";
+  return workbarErrorMessage(cause);
+}
+
 export function FilesPanelController({ workspacePath, sessionId, active }: WorkbarPanelHostProps) {
   const runtime = window.pico.runtime;
   const scope = useMemo(() => ({ workspacePath, sessionId }), [workspacePath, sessionId]);
@@ -24,20 +47,27 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
   const [loading, setLoading] = useState(false);
   const [contentLoading, setContentLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const [errorDiagnostic, setErrorDiagnostic] = useState<string>();
   const [contentError, setContentError] = useState<string>();
+  const [contentDiagnostic, setContentDiagnostic] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const streamRef = useRef<ArtifactStreamAccumulator | undefined>(undefined);
   const requestRef = useRef(0);
   const contentRequestRef = useRef(0);
   const selectedArtifactRef = useRef<string | undefined>(undefined);
+  const reloadAttemptedRef = useRef(false);
+  const contentReloadAttemptedRef = useRef(false);
+  const contentRetryRef = useRef<() => void>(() => undefined);
 
   const refresh = useCallback(async () => {
     const request = ++requestRef.current;
     setLoading(true);
     setError(undefined);
+    setErrorDiagnostic(undefined);
     try {
       const next = await queryAllWorkbarArtifacts(runtime, scope);
       if (request !== requestRef.current) return;
+      reloadAttemptedRef.current = false;
       setArtifacts(next.artifacts);
       setRevision(next.revision);
       const selected = selectedArtifactRef.current;
@@ -49,10 +79,19 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
         setContent(undefined);
         setContentLoading(false);
         setContentError(undefined);
+        setContentDiagnostic(undefined);
         setNotice("该生成文件已不存在，已返回列表。");
       }
     } catch (cause) {
-      if (request === requestRef.current) setError(workbarErrorMessage(cause));
+      if (request !== requestRef.current) return;
+      setError(filesPanelErrorMessage(cause));
+      setErrorDiagnostic(cause instanceof Error ? cause.message : String(cause));
+      if (cause instanceof ArtifactReloadRequiredError && !reloadAttemptedRef.current) {
+        reloadAttemptedRef.current = true;
+        window.setTimeout(() => {
+          if (request === requestRef.current) void refresh();
+        }, 0);
+      }
     } finally {
       if (request === requestRef.current) setLoading(false);
     }
@@ -115,8 +154,21 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
           )
             break;
         } while (request === contentRequestRef.current);
+        contentReloadAttemptedRef.current = false;
       } catch (cause) {
-        if (request === contentRequestRef.current) setContentError(workbarErrorMessage(cause));
+        if (request !== contentRequestRef.current) return;
+        setContentError(filesPanelErrorMessage(cause));
+        setContentDiagnostic(cause instanceof Error ? cause.message : String(cause));
+        contentRetryRef.current = () => {
+          contentReloadAttemptedRef.current = false;
+          void loadChunk(artifactId, 0);
+        };
+        if (cause instanceof ArtifactReloadRequiredError && !contentReloadAttemptedRef.current) {
+          contentReloadAttemptedRef.current = true;
+          window.setTimeout(() => {
+            if (request === contentRequestRef.current) void loadChunk(artifactId, 0);
+          }, 0);
+        }
       } finally {
         if (request === contentRequestRef.current) setContentLoading(false);
       }
@@ -130,6 +182,8 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
       setSelectedArtifactId(artifactId);
       setNotice(undefined);
       setContentError(undefined);
+      setContentDiagnostic(undefined);
+      contentReloadAttemptedRef.current = false;
       streamRef.current = undefined;
       setContent(undefined);
       void loadChunk(artifactId, 0);
@@ -145,6 +199,7 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
     setContent(undefined);
     setContentLoading(false);
     setContentError(undefined);
+    setContentDiagnostic(undefined);
   }, []);
 
   const exportArtifact = async (
@@ -152,11 +207,14 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
     action: "open" | "saveAs" | "openInDefaultApp",
   ) => {
     setContentError(undefined);
+    setContentDiagnostic(undefined);
     try {
       const result = await window.pico.artifacts[action]({ ...scope, artifactId });
       if (!result.ok) throw new Error(result.error.message);
     } catch (cause) {
       setContentError(workbarErrorMessage(cause));
+      setContentDiagnostic(cause instanceof Error ? cause.message : String(cause));
+      contentRetryRef.current = () => void exportArtifact(artifactId, action);
     }
   };
 
@@ -168,9 +226,13 @@ export function FilesPanelController({ workspacePath, sessionId, active }: Workb
       loading={loading}
       contentLoading={contentLoading}
       error={error}
+      errorDiagnostic={errorDiagnostic}
       contentError={contentError}
+      contentDiagnostic={contentDiagnostic}
       notice={notice}
       onRefresh={() => void refresh()}
+      onRetryError={() => void refresh()}
+      onRetryContent={() => contentRetryRef.current()}
       onSelectArtifact={selectArtifact}
       onBack={backToList}
       onLoadChunk={(artifactId, offset) => void loadChunk(artifactId, offset)}
@@ -203,7 +265,8 @@ export async function queryAllWorkbarArtifacts(
     });
     const page = parseArtifactPage(value);
     revision ??= page.revision;
-    if (page.revision !== revision) throw new Error("生成文件分页版本发生变化，请重试。");
+    if (page.revision !== revision)
+      throw new ArtifactReloadRequiredError("生成文件分页版本发生变化。");
     artifacts.push(...page.artifacts.map(artifactView));
     cursor = page.nextCursor;
   } while (cursor);
@@ -236,14 +299,16 @@ export function appendArtifactStreamChunk(
 ): ArtifactStreamAccumulator {
   const expectedOffset = previous?.nextOffset ?? 0;
   if (previous && previous.artifactId !== artifact.id) {
-    throw new Error("生成文件分块不能跨 Artifact 合并。");
+    throw new ArtifactPayloadError("生成文件分块不能跨 Artifact 合并。");
   }
   if (chunk.offsetBytes !== expectedOffset || chunk.endOffsetBytes < chunk.offsetBytes) {
-    throw new Error(`生成文件分块不连续：expected ${expectedOffset}, actual ${chunk.offsetBytes}`);
+    throw new ArtifactReloadRequiredError(
+      `生成文件分块不连续：expected ${expectedOffset}, actual ${chunk.offsetBytes}`,
+    );
   }
   const decoded = decodeBase64(chunk.contentBase64);
   if (decoded.byteLength !== chunk.endOffsetBytes - chunk.offsetBytes) {
-    throw new Error("生成文件分块长度与 authority 返回的字节范围不一致。");
+    throw new ArtifactReloadRequiredError("生成文件分块长度与返回的字节范围不一致。");
   }
   if (
     chunk.totalBytes < chunk.endOffsetBytes ||
@@ -251,7 +316,7 @@ export function appendArtifactStreamChunk(
     (chunk.truncated && (chunk.nextOffsetBytes !== chunk.endOffsetBytes || decoded.length === 0)) ||
     (!chunk.truncated && chunk.endOffsetBytes !== chunk.totalBytes)
   ) {
-    throw new Error("生成文件分块范围或总长度发生变化。");
+    throw new ArtifactReloadRequiredError("生成文件分块范围或总长度发生变化。");
   }
   if (chunk.endOffsetBytes > artifactPreviewLimit(artifact))
     throw new Error("生成文件内容超过内嵌预览上限。");
@@ -309,14 +374,14 @@ function parseArtifactPage(value: unknown): {
   readonly artifacts: readonly RuntimeSessionArtifact[];
   readonly nextCursor?: string;
 } {
-  if (!isRecord(value)) throw new Error("生成文件 authority 返回了无效列表。");
+  if (!isRecord(value)) throw new ArtifactPayloadError("生成文件返回了无效列表。");
   const revision = numberField(value, "revision");
   if (revision === undefined || !Array.isArray(value["artifacts"])) {
-    throw new Error("生成文件 authority 返回了无效列表。");
+    throw new ArtifactPayloadError("生成文件返回了无效列表。");
   }
   const artifacts = value["artifacts"].filter(isRuntimeArtifact);
   if (artifacts.length !== value["artifacts"].length) {
-    throw new Error("生成文件列表包含无效条目。");
+    throw new ArtifactPayloadError("生成文件列表包含无效条目。");
   }
   return {
     revision,
@@ -326,7 +391,7 @@ function parseArtifactPage(value: unknown): {
 }
 
 function parseArtifactChunk(value: unknown): ArtifactChunkEnvelope {
-  if (!isRecord(value)) throw new Error("生成文件 authority 返回了无效分块。");
+  if (!isRecord(value)) throw new ArtifactPayloadError("生成文件返回了无效分块。");
   const contentBase64 =
     typeof value["contentBase64"] === "string" ? value["contentBase64"] : undefined;
   const offsetBytes = numberField(value, "offsetBytes");
@@ -338,7 +403,7 @@ function parseArtifactChunk(value: unknown): ArtifactChunkEnvelope {
     endOffsetBytes === undefined ||
     totalBytes === undefined
   ) {
-    throw new Error("生成文件 authority 返回了无效分块。");
+    throw new ArtifactPayloadError("生成文件返回了无效分块。");
   }
   return {
     contentBase64,
@@ -382,7 +447,7 @@ function decodeBase64(value: string): Uint8Array {
     const binary = globalThis.atob(value);
     return Uint8Array.from(binary, (character) => character.charCodeAt(0));
   } catch {
-    throw new Error("生成文件分块不是有效 Base64。");
+    throw new ArtifactPayloadError("生成文件分块不是有效 Base64。");
   }
 }
 

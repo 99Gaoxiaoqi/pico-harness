@@ -129,6 +129,24 @@
   color: var(--warning-foreground, #92400e);
 }
 
+.tool-panel__error-message {
+  min-width: 0;
+}
+
+.tool-panel__error-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.tool-panel__error-actions .button {
+  min-height: 24px;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
 .tool-panel__scroll,
 .tool-panel__sidebar,
 .tool-panel__detail {

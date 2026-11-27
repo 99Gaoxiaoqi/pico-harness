@@ -43,5 +43,5 @@ export function workbarErrorMessage(cause: unknown): string {
     return "当前任务没有关联 Git 项目，变更审阅仅在 Git 项目中可用。";
   }
   if (cause instanceof Error && cause.message) return cause.message;
-  return "工作栏 authority 请求失败。";
+  return "读取数据失败，请重试。";
 }
