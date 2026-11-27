@@ -1364,7 +1364,7 @@ test("非Excel通用建议的使用说明不充当硬条件，采用与验证保
   );
 });
 
-test("100ms超时及终态提交后的中断都从persisted cursor恢复，新无关输入不会丢掉旧候选", async (t) => {
+test("慢采集在后台续跑落盘，只有硬上限中止才诊断，且都从persisted cursor恢复", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pico-task-cursor-recovery-"));
   const workDir = join(root, "workspace");
   await mkdir(workDir);
@@ -1417,7 +1417,7 @@ test("100ms超时及终态提交后的中断都从persisted cursor恢复，新�
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  const diagnostics: string[] = [];
+  const quietDiagnostics: string[] = [];
   const runtime = new TaskExperienceRuntime({
     session: {
       id: sessionId,
@@ -1444,24 +1444,28 @@ test("100ms超时及终态提交后的中断都从persisted cursor恢复，新�
     },
     gate: async () => ({ allowed: true }),
     worker: { wake() {} },
-    onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.reason),
+    collectionBudgets: { foregroundMs: 20, backgroundMs: 1_000 },
+    onDiagnostic: (diagnostic) => quietDiagnostics.push(diagnostic.reason),
   });
+  const settle = async () => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const current = await store.taskExperiences.latestTaskExperienceTask(workspaceKey, sessionId);
+      if (current) return current;
+      await delay(10);
+    }
+    return store.taskExperiences.latestTaskExperienceTask(workspaceKey, sessionId);
+  };
   await runtime.admit(runId);
   await runtime.capture();
-  assert.deepEqual(diagnostics, ["collection_deadline"]);
-  assert.equal(
-    await store.taskExperiences.latestTaskExperienceTask(workspaceKey, sessionId),
-    undefined,
-  );
-  await runtime.capture();
-  const task = await store.taskExperiences.latestTaskExperienceTask(workspaceKey, sessionId);
-  assert.ok(task);
+  const task = await settle();
+  assert.ok(task, "前台预算耗尽后采集必须继续完成并落盘");
   assert.equal(task.throughSequence, 2);
-  await delay(40);
+  assert.equal(quietDiagnostics.length, 0, "慢采集只要完成就不应诊断为超时");
+  await runtime.capture();
   assert.equal(
     (await store.taskExperiences.listTaskExperienceObservations(task.taskId)).length,
     1,
-    "超时旧writer不能重复提交",
+    "后台续跑的同一pass不能重复提交",
   );
   await events.append(
     {
@@ -1472,6 +1476,12 @@ test("100ms超时及终态提交后的中断都从persisted cursor恢复，新�
     { ownerFence },
   );
   await runtime.completed(runId);
+  for (
+    let attempt = 0;
+    attempt < 200 && !quietDiagnostics.includes("task_experience_collection_unavailable");
+    attempt++
+  )
+    await delay(10);
   const observations = await store.taskExperiences.listTaskExperienceObservations(task.taskId);
   assert.equal(
     observations.find((observation) => observation.kind === "terminal")?.status,
@@ -1480,8 +1490,8 @@ test("100ms超时及终态提交后的中断都从persisted cursor恢复，新�
   const committed = await store.taskExperiences.readTaskExperienceTask(task.taskId);
   assert.equal(committed?.throughSequence, 3);
   assert.equal((await store.taskExperiences.queryTaskExperiences(workspaceKey)).length, 0);
-  assert.ok(diagnostics.includes("task_experience_collection_unavailable"));
-  assert.ok(!diagnostics.includes("simulated_candidate_crash"), "持久诊断只返回稳定code");
+  assert.ok(quietDiagnostics.includes("task_experience_collection_unavailable"));
+  assert.ok(!quietDiagnostics.includes("simulated_candidate_crash"), "持久诊断只返回稳定code");
   assert.equal(
     (await events.readSessionEntriesPage(sessionId, { afterSequence: committed!.throughSequence }))
       .length,
@@ -1551,4 +1561,44 @@ test("100ms超时及终态提交后的中断都从persisted cursor恢复，新�
     undefined,
     "重复恢复不复制job",
   );
+
+  const stalledDiagnostics: string[] = [];
+  const stalled = new TaskExperienceRuntime({
+    session: {
+      id: sessionId,
+      runtimeEventStore: {
+        readSessionEntriesPage: async (...args) => {
+          await delay(600);
+          return events.readSessionEntriesPage(...args);
+        },
+        readSessionEvent: (...args) => events.readSessionEvent(...args),
+        readToolOperation: (...args) => events.readToolOperation(...args),
+        readRun: (...args) => events.readRun(...args),
+      },
+    },
+    workspaceKey,
+    workDir,
+    store,
+    gate: async () => ({ allowed: true }),
+    worker: { wake() {} },
+    collectionBudgets: { foregroundMs: 10, backgroundMs: 150 },
+    onDiagnostic: (diagnostic) =>
+      stalledDiagnostics.push(`${diagnostic.phase}:${diagnostic.reason}`),
+  });
+  await stalled.admit(nextRunId);
+  await stalled.capture();
+  for (
+    let attempt = 0;
+    attempt < 100 && !stalledDiagnostics.includes("capture:collection_deadline");
+    attempt++
+  )
+    await delay(10);
+  assert.ok(stalledDiagnostics.includes("capture:collection_deadline"), "硬上限内仍未完成才诊断");
+  assert.equal(
+    (await store.taskExperiences.latestTaskExperienceTask(workspaceKey, sessionId))
+      ?.throughSequence,
+    5,
+    "硬上限中止时未提交的pass不能推进cursor",
+  );
+  await delay(500);
 });
