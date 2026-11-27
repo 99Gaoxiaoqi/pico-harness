@@ -7,14 +7,15 @@
 // 安全语义:与 ReadFileTool 一致,搜索路径经 safeResolve 锚定到工作区根,
 // 不允许越界读取工作区之外的文件。
 
-import { spawnSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { delimiter, join, relative, resolve } from "node:path";
 import type { Dirent } from "node:fs";
 import type { BaseTool, ToolExecutionContext } from "./tool-registry-contract.js";
 import type { ToolDefinition } from "@pico/core";
 import { ToolAccesses } from "@pico/runtime/tool-access";
+import { raceWithDeadline } from "@pico/runtime/deadline";
 import { WorkspaceRoots } from "./workspace-roots.js";
 import { reportWorkspaceFileScans } from "@pico/runtime/file-scan-observer";
 import {
@@ -22,6 +23,7 @@ import {
   defaultSandboxScratchRoot,
   managedProcessLauncher,
   SandboxViolationError,
+  type ManagedProcess,
   type SandboxConfig,
   type SandboxProfile,
 } from "./process-sandbox/index.js";
@@ -100,8 +102,8 @@ export function resetRgCache(): void {
  * 强制覆盖 rg 可用性结论(仅测试用)。
  * 传 false 强制走 Node.js 降级路径;传 true 强制走 rg 路径(要求环境中真有 rg)。
  */
-export function setRgAvailable(value: boolean): void {
-  rgExecutable = value ? (detectRgExecutable() ?? "rg") : false;
+export async function setRgAvailable(value: boolean): Promise<void> {
+  rgExecutable = value ? ((await detectRgExecutable()) ?? "rg") : false;
 }
 
 /**
@@ -111,39 +113,64 @@ export function setRgAvailable(value: boolean): void {
  *
  * 仅凭存在性/access 检查不足以信任候选：Windows 上 X_OK 等价于存在性检查，PATH
  * 里可能残留其它产品（例如 IDE）自带但已被升级/删除的 rg，真正 spawn 时才以
- * ENOENT 暴露。因此候选必须实际执行 `--version` 成功才被采用。
+ * ENOENT 暴露。因此候选必须真实执行 `--version` 成功才被采用。
  */
-function detectRgExecutable(): string | undefined {
+async function detectRgExecutable(): Promise<string | undefined> {
   const extensions = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (!directory) continue;
     for (const extension of extensions) {
       const executable = resolve(directory, `rg${extension}`);
-      if (verifyRgExecutable(executable)) return executable;
+      if (await verifyRgExecutable(executable)) return executable;
     }
   }
   return undefined;
 }
 
-/** 在同一次调用可见的环境里真实执行一次 rg，确认它既能找到也能启动。 */
-function verifyRgExecutable(executable: string): boolean {
+/**
+ * 在同一次调用可见的环境与实践路径里真实执行一次 rg，确认它既能找到也能启动。
+ * 进程启动统一走 managedProcessLauncher（danger-full-access 仅做直接 spawn），
+ * 不绕过模型可触发进程的收口边界。
+ */
+async function verifyRgExecutable(executable: string): Promise<boolean> {
   try {
     accessSync(executable, constants.X_OK);
   } catch {
     return false;
   }
+  const cwd = tmpdir();
+  let child: ManagedProcess["child"];
   try {
-    const probe = spawnSync(executable, ["--version"], {
-      encoding: "utf8",
-      timeout: RG_PROBE_TIMEOUT_MS,
-      windowsHide: true,
-      env: process.env,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return probe.error === undefined && probe.status === 0 && /ripgrep/u.test(probe.stdout ?? "");
+    child = managedProcessLauncher.launch(
+      {
+        command: executable,
+        args: ["--version"],
+        cwd,
+        env: process.env,
+        origin: "grep",
+        policy: createSandboxPolicy({
+          profile: "danger-full-access",
+          workspaceRoots: [cwd],
+          scratchRoot: defaultSandboxScratchRoot(cwd),
+        }),
+      },
+      { stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+    ).child;
   } catch {
     return false;
   }
+  const outcome = Promise.withResolvers<boolean>();
+  let stdout = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+  });
+  child.once("error", () => outcome.resolve(false));
+  child.once("close", (code) => outcome.resolve(code === 0 && /ripgrep/u.test(stdout)));
+  if (!(await raceWithDeadline(outcome.promise, RG_PROBE_TIMEOUT_MS))) {
+    child.kill("SIGKILL");
+    return false;
+  }
+  return outcome.promise;
 }
 
 /** 解析 grep 工具入参,带类型校验。 */
@@ -625,7 +652,7 @@ export class GrepTool implements BaseTool {
 
     // 探测 rg(模块级缓存,只探测一次；探测本身会真实执行一次 --version)
     if (rgExecutable === null) {
-      rgExecutable = detectRgExecutable() ?? false;
+      rgExecutable = (await detectRgExecutable()) ?? false;
     }
 
     // 只有真正施加 OS 沙箱的 profile 才要求 rg 失败时 fail closed；
@@ -633,6 +660,15 @@ export class GrepTool implements BaseTool {
     // 否则一次环境故障会让整个 grep 工具不可用。
     const sandboxed =
       processSandbox !== undefined && processSandbox.profile !== "danger-full-access";
+
+    // 受限沙箱下没有可用 rg 时不能退回宿主 Node.js 直接读文件，否则等于绕过
+    // 同一 OS 沙箱边界；带 sandbox 描述符的正常装配都在沙箱 Worker 内执行。
+    if (sandboxed && rgExecutable === false) {
+      throw new SandboxViolationError(
+        "sandbox_unavailable",
+        "受限沙箱任务中没有可执行的 ripgrep；为避免绕过 OS 沙箱边界，未降级到宿主 Node.js 读取。",
+      );
+    }
 
     // 优先 rg 路径
     if (rgExecutable !== false && maxFiles === undefined) {

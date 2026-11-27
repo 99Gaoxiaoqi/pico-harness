@@ -56,7 +56,7 @@ test("Grep refreshes its process sandbox per invocation and rejects unsupported 
 
   roots.replaceBoundaryEntries([{ path: canonicalExternal, access: "read", scope: "subtree" }]);
   descriptor = { ...descriptor, readRoots: [canonicalExternal], generation: 1 };
-  setRgAvailable(true);
+  await setRgAvailable(true);
   const launches: ManagedSpawnRequest[] = [];
   context.mock.method(managedProcessLauncher, "launch", (request: ManagedSpawnRequest) => {
     launches.push(request);

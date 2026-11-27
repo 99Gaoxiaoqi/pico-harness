@@ -61,7 +61,7 @@ test("rg spawn 失败时只有真实 OS 沙箱 fail closed，danger-full-access 
     await rm(root, { recursive: true, force: true });
   });
   resetRgCache();
-  setRgAvailable(true);
+  await setRgAvailable(true);
   context.mock.method(managedProcessLauncher, "launch", () => {
     throw new Error("rg spawn exploded");
   });
@@ -80,10 +80,26 @@ test("rg spawn 失败时只有真实 OS 沙箱 fail closed，danger-full-access 
     /needle\.txt:1:spawn-failure-needle/u,
   );
   assert.equal(warnings.length, 1, "降级路径必须留痕");
+});
 
-  const sandboxed = new GrepTool(workspace, { processSandbox: { profile: "read-only" } });
+test("受限沙箱缺少可用 rg 时 fail closed，不退化到宿主 Node.js 读取", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "pico-grep-rg-sandbox-missing-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  await writeFile(join(workspace, "needle.txt"), "sandbox-no-rg-needle\n", "utf8");
+  context.after(async () => {
+    resetRgCache();
+    await rm(root, { recursive: true, force: true });
+  });
+  resetRgCache();
+  // 探测同样走 managedProcessLauncher；launch 失败即表示没有可验证的 rg。
+  context.mock.method(managedProcessLauncher, "launch", () => {
+    throw new Error("rg launch unavailable");
+  });
+
+  const grep = new GrepTool(workspace, { processSandbox: { profile: "read-only" } });
   await assert.rejects(
-    sandboxed.execute(JSON.stringify({ pattern: "spawn-failure-needle" })),
-    /rg spawn exploded/u,
+    grep.execute(JSON.stringify({ pattern: "sandbox-no-rg-needle" })),
+    /没有可执行的 ripgrep/u,
   );
 });
