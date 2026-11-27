@@ -27,6 +27,7 @@ import { PicoTheme } from './apps/desktop/src/renderer/astryx-provider.tsx';
 import { MarkdownText } from './apps/desktop/src/renderer/conversation/MarkdownText.tsx';
 import { StreamingMarkdownText } from './apps/desktop/src/renderer/conversation/StreamingMarkdownText.tsx';
 import { ConversationTranscript } from './apps/desktop/src/renderer/conversation/ConversationTranscript.tsx';
+import { IncrementalMarkdownRenderer, parseMarkdownDocument } from './apps/desktop/src/renderer/streaming-markdown/index.js';
 
 const FRAME_MS = 80;
 const FRAMES = 40;
@@ -182,6 +183,25 @@ async function runPhase(kind, streaming) {
     streamingBlocks: document.querySelectorAll('.streaming-markdown__block').length,
   };
 
+  // CPU 工作量对照：同一进程内「整篇解析 N 次」vs「增量更新 FRAMES 次」。
+  // 与 rAF 帧时间不同，这个比值不依赖机器快慢（两侧同机同时刻测量）。
+  const fullText = textFor(FRAMES);
+  parseMarkdownDocument(fullText.slice(0, 64));
+  const fullRuns = FRAMES;
+  const fullStart = performance.now();
+  for (let index = 0; index < fullRuns; index += 1) parseMarkdownDocument(fullText);
+  const fullMs = performance.now() - fullStart;
+  const incrementalRenderer = new IncrementalMarkdownRenderer();
+  const incrementalStart = performance.now();
+  for (let frame = 1; frame <= FRAMES; frame += 1) incrementalRenderer.update(textFor(frame));
+  const incrementalMs = performance.now() - incrementalStart;
+  const cpu = {
+    fullMs: Math.round(fullMs * 100) / 100,
+    incrementalMs: Math.round(incrementalMs * 100) / 100,
+    fullRuns,
+    updates: FRAMES,
+  };
+
   running = false;
   await fetch('/result', {
     method: 'POST',
@@ -192,7 +212,8 @@ async function runPhase(kind, streaming) {
       parity: { plainHeight: Math.round(baselineHeight * 100) / 100, streamedHeight: Math.round(streamedHeight * 100) / 100 },
       finished,
       transcript,
-      textBytes: textFor(FRAMES).length,
+      cpu,
+      textBytes: fullText.length,
     }),
   });
 })().catch((error) =>
@@ -208,6 +229,7 @@ async function runPhase(kind, streaming) {
     baseline: { p95: number };
     streaming: { p95: number };
     parity: { plainHeight: number; streamedHeight: number };
+    cpu: { fullMs: number; incrementalMs: number; fullRuns: number; updates: number };
   };
   console.log("流式 Markdown 接线报告:", JSON.stringify(report));
   assert.equal(report.error, undefined, String(report.error));
@@ -225,8 +247,14 @@ async function runPhase(kind, streaming) {
   assert.ok(report.finished.markdown >= 1, "流结束后没有回落到 MarkdownText");
   // 确定性：会话记录里流式助手消息走增量渲染（含 pico:// 的消息内部回落）。
   assert.equal(report.transcript.streamingViews, 1, "会话记录未接入流式渲染");
+  // 确定性（同机比值）：增量更新总 CPU 工作量显著低于整篇重复解析。
+  // 帧时间只记录：rAF 间隔在 CI 上会被机器负载主导，不作断言。
   assert.ok(
-    report.streaming.p95 < report.baseline.p95,
-    `流式 p95 ${report.streaming.p95}ms 未优于基线 ${report.baseline.p95}ms`,
+    report.cpu.fullMs >= 5,
+    `整篇解析基线过短（${report.cpu.fullMs}ms），无法判定工作量比值`,
+  );
+  assert.ok(
+    report.cpu.incrementalMs * 1.5 < report.cpu.fullMs,
+    `增量更新 ${report.cpu.incrementalMs}ms 未显著低于整篇解析 ${report.cpu.fullMs}ms`,
   );
 });
