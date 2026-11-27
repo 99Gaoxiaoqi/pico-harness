@@ -205,7 +205,7 @@ function friendlyRuntimeMessage(raw: string, code?: string): string {
   }
   const lower = raw.toLowerCase();
   if (/api key|unauthorized|\b401\b|invalid.*credential|authentication failed/.test(lower)) {
-    return "模型凭证无效或未配置，请到“模型”页检查 Provider 的 API Key。";
+    return "模型凭证无效或未配置，请到“模型”页检查连接的 API Key。";
   }
   if (/econnrefused|etimedout|fetch failed|socket hang up|network error/.test(lower)) {
     return "无法连接本地 Runtime 或模型服务，请检查网络或重启 Pico。";
@@ -380,7 +380,7 @@ export interface RuntimeActions {
     expectedRevision: string,
   ): Promise<RuntimeSubagentSettingsSnapshot>;
   dismissMessage(): void;
-  showMessage?(message: string): void;
+  showMessage?(message: string, kind?: "notice" | "error"): void;
   listExternalSessionSources(): Promise<RuntimeResult<"externalSessions.sources">["sources"]>;
   listExternalSessions(
     params: RuntimeParams<"externalSessions.list">,
@@ -669,6 +669,8 @@ export interface RuntimeStore {
   readonly data: AppData;
   readonly busy: string | undefined;
   readonly message: string | undefined;
+  /** `error` messages stay until dismissed; `notice` messages clear themselves. */
+  readonly messageKind?: "notice" | "error";
   readonly actions: RuntimeActions;
   readonly executionLearningRevision?: number;
   readonly taskExperienceSupported?: boolean;
@@ -688,7 +690,16 @@ export function useRuntimeStore(): RuntimeStore {
   );
   const [data, setData] = useState<AppData>(preview ? previewData : emptyData);
   const [busy, setBusy] = useState<string>();
-  const [message, setMessage] = useState<string>();
+  const [feedback, setFeedback] = useState<{ text: string; kind: "notice" | "error" }>();
+  // Notices confirm or inform and may clear themselves; errors need to stay on
+  // screen until the user reads the next step (UX-28). Default stays `notice`
+  // so existing success call sites keep their auto-dismiss behavior.
+  const setMessage = useCallback(
+    (text: string | undefined, kind: "notice" | "error" = "notice") =>
+      setFeedback(text === undefined ? undefined : { text, kind }),
+    [],
+  );
+  const message = feedback?.text;
   const [executionLearningRevision, setExecutionLearningRevision] = useState(0);
   const [pendingSends, setPendingSends] = useState<readonly PendingSendEntry[]>([]);
   const [pendingSendBusy, setPendingSendBusy] = useState<readonly string[]>([]);
@@ -739,7 +750,7 @@ export function useRuntimeStore(): RuntimeStore {
           .map((entry) => entry.scope.sourceKey),
       );
     } catch {
-      setMessage("无法读取待确认发送记录。请恢复本地存储后重试；草稿已保留。");
+      setMessage("无法读取待确认发送记录。请恢复本地存储后重试；草稿已保留。", "error");
     }
   }, [getPendingSendRepository]);
   useEffect(() => {
@@ -913,7 +924,7 @@ export function useRuntimeStore(): RuntimeStore {
             ],
           }));
         },
-        onError: (error) => setMessage(errorMessage(error)),
+        onError: (error) => setMessage(errorMessage(error), "error"),
       });
       desktopContinuityBridgeRef.current = bridge;
       desktopContinuityRef.current = continuity;
@@ -927,7 +938,7 @@ export function useRuntimeStore(): RuntimeStore {
     // Keep host-provided Chinese explanations; only replace opaque technical text
     // with an actionable fallback that says what was preserved and what to do.
     const technical = !/[\u4e00-\u9fff]/u.test(message) || message === UNKNOWN_ERROR_MESSAGE;
-    setMessage(fallback && technical ? fallback : message);
+    setMessage(fallback && technical ? fallback : message, "error");
   }, []);
 
   const loadWorkspaceIndex = useCallback(
@@ -1080,7 +1091,7 @@ export function useRuntimeStore(): RuntimeStore {
         providerConfig: parseProviderConfig({}, false),
         notices: {
           ...current.notices,
-          providers: "当前 Runtime 缺少统一配置能力。请完全退出并重新启动 Pico 后再管理 Provider。",
+          providers: "当前 Runtime 缺少统一配置能力。请完全退出并重新启动 Pico 后再管理连接。",
         },
       }));
       return;
@@ -1978,7 +1989,7 @@ export function useRuntimeStore(): RuntimeStore {
         handleEvent,
       );
       const result = await subscription.ready;
-      if (!result.ok && !disposed) setMessage(`事件订阅失败：${result.error.message}`);
+      if (!result.ok && !disposed) setMessage(`事件订阅失败：${result.error.message}`, "error");
     })().catch((error: unknown) => {
       if (!disposed) reportFailure(error);
     });
@@ -2034,7 +2045,7 @@ export function useRuntimeStore(): RuntimeStore {
               return false;
             }
           }
-          setMessage("记忆已在另一处更新，已重新加载最新内容。请检查后重试本次操作。");
+          setMessage("记忆已在另一处更新，已重新加载最新内容。请检查后重试本次操作。", "error");
           return false;
         }
         if (
@@ -2052,7 +2063,7 @@ export function useRuntimeStore(): RuntimeStore {
               return false;
             }
           }
-          setMessage("MCP 配置已在另一处更新，已刷新用户级列表。请检查后重试。");
+          setMessage("MCP 配置已在另一处更新，已刷新用户级列表。请检查后重试。", "error");
           return false;
         }
         if (
@@ -2061,11 +2072,14 @@ export function useRuntimeStore(): RuntimeStore {
           error.code === "METHOD_NOT_FOUND"
         ) {
           if (label.startsWith("queue-")) {
-            setMessage("当前 Runtime 版本不支持队列管理，请更新 Pico 桌面端后重试。");
+            setMessage("当前 Runtime 版本不支持队列管理，请更新 Pico 桌面端后重试。", "error");
             return false;
           }
           if (label.startsWith("transcript-") || label === "revise-session-message") {
-            setMessage("当前 Runtime 版本不支持这项会话历史操作，请更新 Pico 桌面端后重试。");
+            setMessage(
+              "当前 Runtime 版本不支持这项会话历史操作，请更新 Pico 桌面端后重试。",
+              "error",
+            );
             return false;
           }
         }
@@ -2088,7 +2102,7 @@ export function useRuntimeStore(): RuntimeStore {
           }
           // CONFLICT also includes dependency guards (stored keys, default routes, active
           // runs). Refresh the snapshot, but preserve the actionable server explanation.
-          setMessage(error.message);
+          setMessage(error.message, "error");
           return false;
         }
         reportFailure(error, ACTION_FAILURE_FALLBACKS[label]);
@@ -2112,7 +2126,7 @@ export function useRuntimeStore(): RuntimeStore {
       // Queue mutations do not advance the transcript watermark. Reopen the
       // replica immediately so later stream frames cannot restore its old queue.
       void loadConversation(bridge, ref.workspacePath, ref.sessionId).catch((cause) =>
-        setMessage(`队列操作已完成，但刷新失败：${errorMessage(cause)}`),
+        setMessage(`队列操作已完成，但刷新失败：${errorMessage(cause)}`, "error"),
       );
     },
     [loadConversation],
@@ -2123,8 +2137,8 @@ export function useRuntimeStore(): RuntimeStore {
       dismissMessage() {
         setMessage(undefined);
       },
-      showMessage(text) {
-        setMessage(text);
+      showMessage(text, kind) {
+        setMessage(text, kind);
       },
       async listExternalSessionSources() {
         if (preview) {
@@ -2152,7 +2166,7 @@ export function useRuntimeStore(): RuntimeStore {
         try {
           await loadWorkspace(bridge, result.session.workspacePath);
         } catch (error) {
-          setMessage(`任务已导入，但工作区刷新失败：${errorMessage(error)}`);
+          setMessage(`任务已导入，但工作区刷新失败：${errorMessage(error)}`, "error");
         }
         return result.session;
       },
@@ -2568,7 +2582,7 @@ export function useRuntimeStore(): RuntimeStore {
               loadWorkspace(bridge, workspacePath),
             ]);
           })().catch((cause) =>
-            setMessage(`发送已确认，但原会话暂时不可用：${errorMessage(cause)}`),
+            setMessage(`发送已确认，但原会话暂时不可用：${errorMessage(cause)}`, "error"),
           );
         });
         return {
@@ -2613,7 +2627,7 @@ export function useRuntimeStore(): RuntimeStore {
               return;
             await loadConversation(bridge, workspacePath, sessionId);
           })().catch((cause) => {
-            setMessage(`发送已确认，但原会话暂时不可用：${errorMessage(cause)}`);
+            setMessage(`发送已确认，但原会话暂时不可用：${errorMessage(cause)}`, "error");
           });
         });
         return { succeeded: succeeded && Boolean(recovered), ...recovered };
@@ -3366,12 +3380,13 @@ export function useRuntimeStore(): RuntimeStore {
       async addUserMcp(server) {
         const revision = dataRef.current.mcpScope.userRevision;
         if (!revision) {
-          setMessage("MCP 用户级配置尚未加载，请刷新后再试。");
+          setMessage("MCP 用户级配置尚未加载，请刷新后再试。", "error");
           return false;
         }
         if (dataRef.current.mcpScope.userItems.some((item) => item.name === server.name)) {
           setMessage(
             `MCP 服务 ${server.name} 已存在。Desktop v1 不会覆盖现有配置，以避免丢失密钥。`,
+            "error",
           );
           return false;
         }
@@ -3469,7 +3484,7 @@ export function useRuntimeStore(): RuntimeStore {
         const workspacePath = dataRef.current.workspacePath;
         if (workspacePath) {
           void loadWorkspace(bridge, workspacePath).catch((cause: unknown) =>
-            setMessage(errorMessage(cause)),
+            setMessage(errorMessage(cause), "error"),
           );
         }
         return snapshot;
@@ -3477,7 +3492,7 @@ export function useRuntimeStore(): RuntimeStore {
       async deleteUserMcp(serverName) {
         const revision = dataRef.current.mcpScope.userRevision;
         if (!revision) {
-          setMessage("MCP 用户级配置尚未加载，请刷新后再试。");
+          setMessage("MCP 用户级配置尚未加载，请刷新后再试。", "error");
           return false;
         }
         return perform("mcp-user-delete", async (bridge) => {
@@ -3515,14 +3530,15 @@ export function useRuntimeStore(): RuntimeStore {
           ((provider.auth !== "none" && !newConnectionSecret?.trim()) ||
             providerConfig.providers.some((item) => item.id === provider.id))
         ) {
-          setMessage("API Key 不能为空，且新连接 ID 不能与已有连接重复。");
+          setMessage("API Key 不能为空，且新连接 ID 不能与已有连接重复。", "error");
           return false;
         }
         if (!providerConfig.writable) {
           setMessage(
             providerConfig.supported
-              ? "Provider 配置尚未完整加载，请重新加载后再试。"
-              : "当前 Runtime 不支持统一 Provider 配置。请完全退出并重新启动 Pico。",
+              ? "连接配置尚未完整加载，请重新加载后再试。"
+              : "当前 Runtime 不支持统一连接配置。请完全退出并重新启动 Pico。",
+            "error",
           );
           return false;
         }
@@ -3556,11 +3572,11 @@ export function useRuntimeStore(): RuntimeStore {
                 ],
               },
             }));
-            setMessage(`Provider ${provider.id} 已保存。`);
+            setMessage(`连接 ${provider.id} 已保存。`);
             return;
           }
           if (provider.modelCapabilities && !isJsonValue(provider.modelCapabilities)) {
-            throw new Error("Provider modelCapabilities 必须是 JSON 对象。");
+            throw new Error("连接的模型能力配置必须是 JSON 对象。");
           }
           const runtimeProvider: RuntimeProviderInput = {
             id: provider.id,
@@ -3593,7 +3609,7 @@ export function useRuntimeStore(): RuntimeStore {
             const workspacePath = dataRef.current.workspacePath;
             if (workspacePath) await loadWorkspace(bridge, workspacePath);
           }
-          setMessage(`Provider ${provider.id} 已保存。`);
+          setMessage(`连接 ${provider.id} 已保存。`);
         });
       },
       async deleteProvider(providerId) {
@@ -3620,7 +3636,7 @@ export function useRuntimeStore(): RuntimeStore {
               },
             }));
           }
-          setMessage(`Provider ${providerId} 已删除。`);
+          setMessage(`连接 ${providerId} 已删除。`);
         });
       },
       async setDefaultModelRoute(modelRouteId) {
@@ -3762,7 +3778,7 @@ export function useRuntimeStore(): RuntimeStore {
               },
             }));
           }
-          setMessage(`Provider ${providerId} 的 API Key 已保存到 ~/.pico/config.json。`);
+          setMessage(`连接 ${providerId} 的 API Key 已保存到 ~/.pico/config.json。`);
         });
       },
       async deleteProviderCredential(providerId, expectedRevision) {
@@ -3796,7 +3812,7 @@ export function useRuntimeStore(): RuntimeStore {
               },
             }));
           }
-          setMessage(`Provider ${providerId} 在 ~/.pico/config.json 中的 API Key 已删除。`);
+          setMessage(`连接 ${providerId} 在 ~/.pico/config.json 中的 API Key 已删除。`);
         });
       },
       async queryMemoryScope(workspacePath, tab, cursor) {
@@ -4258,7 +4274,7 @@ export function useRuntimeStore(): RuntimeStore {
               await loadMemory(bridge, workspacePath);
             } catch {
               if (dataRef.current.workspacePath === workspacePath)
-                setMessage("记忆已保存，但列表刷新失败。请点击刷新重试。");
+                setMessage("记忆已保存，但列表刷新失败。请点击刷新重试。", "error");
             }
           }
         });
@@ -4583,6 +4599,7 @@ export function useRuntimeStore(): RuntimeStore {
     data,
     busy,
     message,
+    messageKind: feedback?.kind ?? "notice",
     actions,
     executionLearningRevision,
     taskExperienceSupported:

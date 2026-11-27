@@ -9,6 +9,7 @@ import type {
   UsageDashboardDetails,
 } from "@pico/protocol";
 import type { UsageView, WorkspaceView } from "../model.js";
+import { costStatusLabels } from "../view-format.js";
 
 export interface UsageQuerySelection {
   readonly workspacePath: string;
@@ -46,18 +47,12 @@ const statuses: Record<UsageActivity["status"], string> = {
   aborted: "已取消",
   running: "进行中",
 };
-const costLabels: Record<UsageCostStatus, string> = {
-  none: "无费用",
-  estimated: "估算",
-  included: "套餐内",
-  unknown: "未知",
-  partial: "已知部分",
-};
+const costLabels: Record<UsageCostStatus, string> = costStatusLabels;
 function cost(value: number | undefined, status: UsageCostStatus = "unknown") {
-  if (status === "unknown") return "未知";
-  if (status === "included") return "套餐内";
+  if (status === "unknown") return costLabels.unknown;
+  if (status === "included") return costLabels.included;
   if (status === "none") return "—";
-  return `${value === undefined ? "未知" : `¥${value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`} · ${costLabels[status]}`;
+  return `${value === undefined ? costLabels.unknown : `¥${value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`} · ${costLabels[status]}`;
 }
 function duration(value: number | undefined) {
   return value === undefined

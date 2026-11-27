@@ -244,7 +244,7 @@ function Onboarding() {
                 style={{ display: "inline-block", fontSize: 13, marginTop: 8 }}
                 to="/settings/models"
               >
-                连接模型（配置 Provider 与 API Key）→
+                连接模型（配置连接与 API Key）→
               </Link>
             )}
           </div>

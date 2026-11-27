@@ -43,14 +43,7 @@ import { useArchiveUndo } from "./archive-undo.js";
 import { requestConfirm } from "./confirm-dialog.js";
 import { PreviewBadge } from "./components.js";
 import { removePersistentDraft } from "./conversation/index.js";
-import type {
-  ApprovalView,
-  AppRuntimePhase,
-  PromptView,
-  RunView,
-  SessionView,
-  WorkspaceView,
-} from "./model.js";
+import type { ApprovalView, PromptView, RunView, SessionView, WorkspaceView } from "./model.js";
 import {
   appPrimaryNavigation,
   settingsNavigationGroups,
@@ -87,7 +80,7 @@ interface SidebarProjectGroup {
 
 export function AppShell() {
   const runtime = useRuntime();
-  const { data, preview, message, actions, busy, connection } = runtime;
+  const { data, preview, message, messageKind, actions, busy } = runtime;
   const hasPendingSends =
     runtime.pendingSends?.some((entry) => entry.scope.picoHome === data.picoHome) ?? false;
   const location = useLocation();
@@ -156,13 +149,13 @@ export function AppShell() {
   useEffect(() => {
     window.localStorage.setItem("pico.sidebar-collapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
-  // Every new message restarts the countdown, so a later notice is never
-  // dismissed by an earlier timer.
+  // Notices clear themselves; failures stay until the user dismisses them so
+  // the next step does not vanish mid-read (UX-28).
   useEffect(() => {
-    if (!message) return;
+    if (!message || messageKind === "error" || !actions.dismissMessage) return;
     const timer = window.setTimeout(actions.dismissMessage, TOAST_AUTO_DISMISS_MS);
     return () => window.clearTimeout(timer);
-  }, [actions.dismissMessage, message]);
+  }, [actions.dismissMessage, message, messageKind]);
   // Route changes swap the whole page instantly; a short shared fade-up ties the
   // new surface to the navigation that produced it. Driven through WAAPI so the
   // timing comes from the motion tokens and no remount (and no data refetch) is
@@ -207,8 +200,8 @@ export function AppShell() {
       );
       if (archived) {
         offerArchiveUndo(
-          { workspacePath: session.workspacePath, sessionId: session.id },
-          session.title,
+          [{ workspacePath: session.workspacePath, sessionId: session.id }],
+          `「${session.title}」`,
         );
       }
     },
@@ -232,13 +225,16 @@ export function AppShell() {
       return;
     setProjectActionBusy(true);
     try {
+      const archivedRefs: { workspacePath: string; sessionId: string }[] = [];
       for (const session of project.sessions) {
         const archived = await actions.setSessionArchived(
           { workspacePath: session.workspacePath, sessionId: session.id },
           true,
         );
-        if (!archived) return;
+        if (!archived) break;
+        archivedRefs.push({ workspacePath: session.workspacePath, sessionId: session.id });
       }
+      if (archivedRefs.length === 0) return;
       const activeSession = project.sessions.find((session) =>
         isActiveWorkspaceSession(
           { workspacePath: session.workspacePath, sessionId: session.id },
@@ -250,7 +246,9 @@ export function AppShell() {
         navigate(
           newSessionHref(project.key === "unassigned" ? undefined : activeSession.workspacePath),
         );
-      actions.showMessage?.(`已归档“${project.label}”的 ${project.sessions.length} 条聊天。`);
+      // Bulk and single archive share one undo slot so the entry point never
+      // changes whether the action can be taken back (UX-01 / ④).
+      offerArchiveUndo(archivedRefs, `项目「${project.label}」的 ${archivedRefs.length} 条聊天`);
     } finally {
       setProjectActionBusy(false);
     }
@@ -318,11 +316,7 @@ export function AppShell() {
       mobileNav={{ breakpoint: "none", hasToggle: false }}
       sideNav={
         settingsRoute ? (
-          <SettingsSidebar
-            workspacePath={navigationWorkspacePath}
-            onKeyDown={handleNavKeys}
-            connection={connection}
-          />
+          <SettingsSidebar workspacePath={navigationWorkspacePath} onKeyDown={handleNavKeys} />
         ) : (
           <aside
             className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : ""}`}
@@ -438,11 +432,6 @@ export function AppShell() {
                 <Settings aria-hidden="true" />
                 <span className="sidebar__label">设置</span>
               </NavLink>
-              {connection.kind === "ready" && (
-                <div className="runtime-health">
-                  <span /> Runtime 已连接
-                </div>
-              )}
             </div>
           </aside>
         )
@@ -483,7 +472,7 @@ export function AppShell() {
         <PendingSendList runtime={runtime} />
         {message &&
           !message.startsWith("Legacy session-centric (JSONL) workspace storage exists:") && (
-            <div className="toast" role="status">
+            <div className="toast" role={messageKind === "error" ? "alert" : "status"}>
               <span>{message}</span>
               <AstryxButton
                 label="关闭提示"
@@ -512,11 +501,9 @@ export function AppShell() {
 function SettingsSidebar({
   workspacePath,
   onKeyDown,
-  connection,
 }: {
   readonly workspacePath?: string;
   readonly onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
-  readonly connection: AppRuntimePhase;
 }) {
   const returnTo = window.sessionStorage.getItem("pico.settings-return-to");
   const returnHref =
@@ -575,11 +562,6 @@ function SettingsSidebar({
           </nav>
         ))}
       </div>
-      {connection.kind === "ready" && (
-        <div className="runtime-health">
-          <span /> Runtime 已连接
-        </div>
-      )}
     </aside>
   );
 }

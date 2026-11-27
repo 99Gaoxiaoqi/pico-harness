@@ -165,7 +165,7 @@ test("Provider conflicts refresh configuration without replacing actionable serv
   const handler = source.slice(start, source.indexOf("reportFailure(error,", start));
   assert.match(handler, /error\.code === "CONFLICT"/u);
   assert.match(handler, /await loadGlobalProviderConfig\(bridge\)/u);
-  assert.match(handler, /setMessage\(error\.message\)/u);
+  assert.match(handler, /setMessage\(error\.message(?:, "error")?\)/u);
   assert.doesNotMatch(handler, /另一处更新|errorMessage\(error\)/u);
 });
 

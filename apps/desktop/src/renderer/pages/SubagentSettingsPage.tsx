@@ -506,9 +506,9 @@ function SubagentPresetEditor({
         </div>
         {thinkingLevels.length > 0 && (
           <div className="settings-field">
-            <span>思考级别</span>
+            <span>思考强度</span>
             <SelectField
-              label="思考级别"
+              label="思考强度"
               name="thinkingLevel"
               value={
                 draft.thinkingLevel && thinkingLevels.includes(draft.thinkingLevel)

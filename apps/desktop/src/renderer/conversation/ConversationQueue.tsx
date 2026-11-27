@@ -84,7 +84,10 @@ export function ConversationQueue({
       return;
     }
     if (!isSteerableQueuedInput(item.input)) {
-      setSteerNotice({ queueId: item.queueId, text: "包含附件的消息需继续排队。" });
+      setSteerNotice({
+        queueId: item.queueId,
+        text: "这条消息包含附件、技能或子任务，需要继续排队。",
+      });
       return;
     }
     setSteerNotice(undefined);
