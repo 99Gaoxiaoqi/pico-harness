@@ -81,7 +81,7 @@ export class ReadFileTool implements BaseTool {
             type: "integer",
             minimum: 1,
             maximum: TOOL_RESULT_ARCHIVE_MAX_LIMIT,
-            description: `可选，最多读取的行数，默认 ${READ_FILE_DEFAULT_LIMIT_LINES}，普通文件最大 ${READ_FILE_MAX_LIMIT_LINES}；归档 URI 最大 ${TOOL_RESULT_ARCHIVE_MAX_LIMIT}。`,
+            description: `可选，最多读取的行数，默认 ${READ_FILE_DEFAULT_LIMIT_LINES}。普通文件上限 ${READ_FILE_MAX_LIMIT_LINES}，超出会按上限截断并在结果中提示；归档 URI 上限 ${TOOL_RESULT_ARCHIVE_MAX_LIMIT}。`,
           },
         },
         required: ["path"],
@@ -94,6 +94,7 @@ export class ReadFileTool implements BaseTool {
     let path: string;
     let offset: number;
     let limit: number;
+    let requestedLimit: number;
     let paginationRequested: boolean;
     try {
       const input = JSON.parse(args) as { path?: unknown; offset?: unknown; limit?: unknown };
@@ -103,13 +104,13 @@ export class ReadFileTool implements BaseTool {
       path = input.path;
       paginationRequested = input.offset !== undefined || input.limit !== undefined;
       offset = parsePositiveInteger(input.offset, "offset", 1);
-      limit = parsePositiveInteger(input.limit, "limit", READ_FILE_DEFAULT_LIMIT_LINES);
-      const maxLimit = path.startsWith("pico:")
-        ? TOOL_RESULT_ARCHIVE_MAX_LIMIT
-        : READ_FILE_MAX_LIMIT_LINES;
-      if (limit > maxLimit) {
-        throw new Error(`limit 不能超过 ${maxLimit}`);
-      }
+      requestedLimit = parsePositiveInteger(input.limit, "limit", READ_FILE_DEFAULT_LIMIT_LINES);
+      // 普通文件的 limit 上限固定用于保护模型上下文；超出时按上限截断并显式提示，
+      // 而不是让一个合法 intent（多读几行）直接变成工具失败。归档 URI 有独立上限。
+      limit = Math.min(
+        requestedLimit,
+        path.startsWith("pico:") ? TOOL_RESULT_ARCHIVE_MAX_LIMIT : READ_FILE_MAX_LIMIT_LINES,
+      );
     } catch (err) {
       const reason =
         err instanceof SyntaxError
@@ -119,6 +120,7 @@ export class ReadFileTool implements BaseTool {
             : "期望 JSON 含 path 字段";
       throw new Error(`参数解析失败: ${reason}`, { cause: err });
     }
+    const limitClampedFrom = requestedLimit > limit ? requestedLimit : undefined;
 
     if (path.startsWith("pico:")) {
       if (!this.archive) throw new Error("当前会话不支持归档回读");
@@ -172,6 +174,7 @@ export class ReadFileTool implements BaseTool {
         lineEndingStyle,
         paginationRequested,
         clippedLineCount,
+        ...(limitClampedFrom !== undefined ? { limitClampedFrom } : {}),
       });
       if (candidate.length > READ_FILE_MAX_PAGE_CHARS) {
         renderedLines.pop();
@@ -196,6 +199,7 @@ export class ReadFileTool implements BaseTool {
       lineEndingStyle,
       paginationRequested,
       clippedLineCount,
+      ...(limitClampedFrom !== undefined ? { limitClampedFrom } : {}),
     });
   }
 }
@@ -286,6 +290,8 @@ function formatReadPage(input: {
   lineEndingStyle: "lf" | "crlf" | "mixed";
   paginationRequested: boolean;
   clippedLineCount: number;
+  /** 调用方请求但被普通文件上限截断的原始 limit。 */
+  limitClampedFrom?: number;
 }): string {
   const endLine = input.offset + input.renderedLines.length - 1;
   const hasMoreLines = endLine < input.totalLines;
@@ -295,6 +301,11 @@ function formatReadPage(input: {
     : `共 ${input.totalLines} 行,当前显示 ${input.offset}-${endLine} 行,行尾: ${lineEndingStyleLabel(input.lineEndingStyle)}`;
   const parts = [input.renderedLines.join("\n"), status];
 
+  if (input.limitClampedFrom !== undefined) {
+    parts.push(
+      `[提示: limit ${input.limitClampedFrom} 超过普通文件上限 ${input.limit}，已按 ${input.limit} 行读取；继续读取请按 PARTIAL 提示分页。]`,
+    );
+  }
   if (input.clippedLineCount > 0) {
     parts.push(
       `[提示: ${input.clippedLineCount} 个超长行已各自截断至 ${READ_FILE_MAX_RENDERED_LINE_CHARS} chars，请用更精确的 bash 命令定位所需片段。]`,
