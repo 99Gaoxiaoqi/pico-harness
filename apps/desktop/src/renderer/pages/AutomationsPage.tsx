@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { RuntimeRun } from "@pico/protocol";
 import { Button, EmptyState, InlineNotice, StatusPill } from "../components.js";
+import { requestConfirm } from "../confirm-dialog.js";
 import { useRuntime } from "../runtime-context.js";
 import { formatRelative } from "../view-format.js";
 import { sessionHref } from "../workspace-session.js";
@@ -261,9 +262,21 @@ export function AutomationsPage() {
                   <Button
                     variant="quiet"
                     disabled={Boolean(busy)}
-                    onClick={() => {
-                      if (window.confirm(`删除自动化“${job.name}”？此操作无法撤销。`))
-                        void actions.deleteJob(job.id);
+                    onClick={async () => {
+                      if (
+                        !(await requestConfirm({
+                          title: `删除自动化「${job.name}」？`,
+                          body: "此操作无法撤销。",
+                          confirmLabel: "删除",
+                          tone: "danger",
+                          requireText: {
+                            text: job.name,
+                            label: `输入「${job.name}」确认删除`,
+                          },
+                        }))
+                      )
+                        return;
+                      void actions.deleteJob(job.id);
                     }}
                   >
                     删除

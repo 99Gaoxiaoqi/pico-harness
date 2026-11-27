@@ -30,6 +30,7 @@ import { useExperienceLedger } from "./useExperienceLedger.js";
 import { ExperienceUsagePanel } from "./ExperienceUsagePanel.js";
 import { RuntimeInvocationError } from "./runtime.js";
 import { readExperienceManagementTarget } from "./experience-management-route.js";
+import { requestConfirm } from "./confirm-dialog.js";
 import type { ExperienceDetail, ExperienceReviewRequest } from "./useTaskExperience.js";
 
 import "./MemoryPage.css";
@@ -754,9 +755,12 @@ export function MemoryPage({
   const deleteItem = async (item: MemoryListItem) => {
     if (
       typeof window === "undefined" ||
-      !window.confirm(
-        "删除这条记忆？将从长期记忆中删除，无法恢复。原聊天记录仍会保留；之后重新提供或要求记住的信息仍可保存。",
-      )
+      !(await requestConfirm({
+        title: "删除这条记忆？",
+        body: "将从长期记忆中删除，无法恢复。原聊天记录仍会保留；之后重新提供或要求记住的信息仍可保存。",
+        confirmLabel: "删除",
+        tone: "danger",
+      }))
     )
       return;
     if (await actions.deleteMemoryItem(item.itemId, item.version)) {

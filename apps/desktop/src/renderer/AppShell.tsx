@@ -40,6 +40,7 @@ import {
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { TaskSearchDialog } from "./TaskSearchDialog.js";
 import { useArchiveUndo } from "./archive-undo.js";
+import { requestConfirm } from "./confirm-dialog.js";
 import { PreviewBadge } from "./components.js";
 import { removePersistentDraft } from "./conversation/index.js";
 import type { ApprovalView, PromptView, RunView, SessionView, WorkspaceView } from "./model.js";
@@ -244,9 +245,12 @@ export function AppShell() {
     if (
       projectActionBusy ||
       workspacePaths.length === 0 ||
-      !window.confirm(
-        `从 Pico 移除项目“${project.label}”？项目文件和聊天记录会保留，重新添加文件夹后可继续使用。`,
-      )
+      !(await requestConfirm({
+        title: `从 Pico 移除项目「${project.label}」？`,
+        body: "项目文件和聊天记录会保留，重新添加文件夹后可继续使用。",
+        confirmLabel: "移除",
+        tone: "danger",
+      }))
     )
       return;
     setProjectActionBusy(true);
@@ -261,9 +265,12 @@ export function AppShell() {
   };
   const handleDeleteSession = useCallback(
     async (session: SessionView) => {
-      const confirmed = window.confirm(
-        `永久删除“${session.title}”？\n\n会话记录和运行历史将被移除，且无法恢复。`,
-      );
+      const confirmed = await requestConfirm({
+        title: `永久删除「${session.title}」？`,
+        body: "会话记录与运行历史将一并删除，无法恢复。",
+        confirmLabel: "删除",
+        tone: "danger",
+      });
       if (!confirmed) return;
       const deleted = await actions.deleteSession({
         workspacePath: session.workspacePath,

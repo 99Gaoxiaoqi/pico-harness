@@ -17,6 +17,7 @@ import { UsagePage } from "../../apps/desktop/src/renderer/usage/UsagePage.tsx";
 import { ConversationPage } from "../../apps/desktop/src/renderer/pages/ConversationPage.tsx";
 import { SideChatPanelController } from "../../apps/desktop/src/renderer/workbar-panels/SideChatPanelController.tsx";
 import { PicoTheme } from "../../apps/desktop/src/renderer/astryx-provider.tsx";
+import { ConfirmDialogHost } from "../../apps/desktop/src/renderer/confirm-dialog.tsx";
 import { RuntimeContext } from "../../apps/desktop/src/renderer/runtime-context.tsx";
 import { previewData } from "../../apps/desktop/src/renderer/fixture.ts";
 import { workspaceSessionKey } from "../../apps/desktop/src/renderer/workspace-session.ts";
@@ -573,6 +574,7 @@ async function mount(side = false, key = crypto.randomUUID()) {
             </Routes>
           </MemoryRouter>
         </RuntimeContext>
+        <ConfirmDialogHost />
       </PicoTheme>,
     );
     await wait();
@@ -626,6 +628,22 @@ async function command(text: string) {
   await type(text);
   await key("Escape");
   await key("Enter");
+}
+
+async function planExitConfirm(decision: "取消" | "退出 Plan") {
+  await act(async () => {
+    await wait();
+  });
+  const dialog = document.querySelector<HTMLDialogElement>("dialog.confirm-dialog[open]");
+  check(dialog, "退出 Plan 缺少应用内确认");
+  const action = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+    (item) => item.textContent.trim() === decision,
+  );
+  check(action, "缺少确认按钮 " + decision);
+  await act(async () => {
+    action.click();
+    await wait();
+  });
 }
 
 (async () => {
@@ -811,7 +829,6 @@ async function command(text: string) {
       calls.filter((item) => item.method === "compact").length === 1,
       "原按钮没有共享压缩确认流程",
     );
-    const originalConfirm = window.confirm;
     conversation.settings.collaborationMode = "plan";
     runtime.data.approvals.push({
       id: "approval-p1",
@@ -828,32 +845,34 @@ async function command(text: string) {
       expectedSessionSequence: 8,
       controlEpoch: "e1",
     });
-    window.confirm = () => false;
-    check(
-      !(await applyConversationSettings(runtime, ref, {}, { collaborationMode: "agent" })),
-      "取消 Plan 退出仍写入",
-    );
-    window.confirm = () => true;
-    check(
-      await applyConversationSettings(runtime, ref, {}, { collaborationMode: "agent" }),
-      "确认 Plan 退出失败",
-    );
+    const exitToAgent = { collaborationMode: "agent" as const };
+    const cancelledExit = applyConversationSettings(runtime, ref, {}, exitToAgent);
+    await planExitConfirm("取消");
+    check(!(await cancelledExit), "取消 Plan 退出仍写入");
+    const acceptedExit = applyConversationSettings(runtime, ref, {}, exitToAgent);
+    await planExitConfirm("退出 Plan");
+    check(await acceptedExit, "确认 Plan 退出失败");
     check(
       calls.find((item) => item.method === "plan-response")?.input.expectedRevision === 3,
       "Plan 退出丢失 CAS",
     );
     failPlan = true;
     const settingsCount = calls.filter((item) => item.method === "settings").length;
-    check(
-      !(await applyConversationSettings(runtime, ref, {}, { collaborationMode: "research" })),
-      "审批失败仍报告模式切换成功",
+    const failedExit = applyConversationSettings(
+      runtime,
+      ref,
+      {},
+      {
+        collaborationMode: "research",
+      },
     );
+    await planExitConfirm("退出 Plan");
+    check(!(await failedExit), "审批失败仍报告模式切换成功");
     check(
       calls.filter((item) => item.method === "settings").length === settingsCount,
       "审批失败仍更新会话设置",
     );
     failPlan = false;
-    window.confirm = originalConfirm;
     runtime.data.approvals = [];
     conversation.settings.collaborationMode = "agent";
     await command("/changes cp1");

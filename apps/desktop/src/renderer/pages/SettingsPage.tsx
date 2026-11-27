@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2, Folder, FolderGit2, Plus } from "lucide-re
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Button, InlineNotice, StatusPill, WorkspaceModeBadge } from "../components.js";
+import { requestConfirm } from "../confirm-dialog.js";
 import { useRuntime } from "../runtime-context.js";
 import type { DesktopDiagnosticReport } from "../runtime.js";
 import { workspaceDisplayName } from "../workspace-session.js";
@@ -299,8 +300,13 @@ export function WorkspaceSettingsPage() {
                   </Button>
                   <Button
                     disabled={Boolean(busy)}
-                    onClick={() => {
-                      if (window.confirm(`在 ${workspace.path} 初始化 Pico 项目？`))
+                    onClick={async () => {
+                      if (
+                        await requestConfirm({
+                          title: `在 ${workspace.path} 初始化 Pico 项目？`,
+                          confirmLabel: "初始化",
+                        })
+                      )
                         void actions.initializeWorkspace(workspace.path);
                     }}
                   >
@@ -308,12 +314,13 @@ export function WorkspaceSettingsPage() {
                   </Button>
                   <Button
                     disabled={Boolean(busy)}
-                    onClick={() => {
+                    onClick={async () => {
                       const action = workspace.trusted ? "撤销信任" : "信任";
                       if (
-                        window.confirm(
-                          `${action}项目 ${workspaceDisplayName(workspace.path, workspace)}？`,
-                        )
+                        await requestConfirm({
+                          title: `${action}项目「${workspaceDisplayName(workspace.path, workspace)}」？`,
+                          confirmLabel: action,
+                        })
                       )
                         void actions.trustWorkspace(workspace.path, !workspace.trusted);
                     }}
@@ -323,11 +330,14 @@ export function WorkspaceSettingsPage() {
                   <Button
                     variant="danger"
                     disabled={Boolean(busy)}
-                    onClick={() => {
+                    onClick={async () => {
                       if (
-                        window.confirm(
-                          `从 Pico 项目列表移除 ${workspaceDisplayName(workspace.path, workspace)}？磁盘文件不会被删除。`,
-                        )
+                        await requestConfirm({
+                          title: `从 Pico 项目列表移除「${workspaceDisplayName(workspace.path, workspace)}」？`,
+                          body: "磁盘文件不会被删除。",
+                          confirmLabel: "移除",
+                          tone: "danger",
+                        })
                       )
                         void actions.unregisterWorkspace(workspace.path);
                     }}

@@ -4,6 +4,7 @@ import { Network, Plus, WandSparkles } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ComponentProps } from "react";
 import { Link, Navigate, useParams, useNavigate } from "react-router-dom";
 import { Button, CapabilityList, InlineNotice } from "../components.js";
+import { requestConfirm } from "../confirm-dialog.js";
 import type { CapabilityView, McpServerDraft } from "../model.js";
 import { useRuntime } from "../runtime-context.js";
 
@@ -142,8 +143,15 @@ export function CapabilityPage({
           emptyDetail="当前 Runtime 没有返回任何配置；Pico 不会填充示例项。"
           {...(kind === "mcp"
             ? {
-                onDelete: (item: CapabilityView) => {
-                  if (!window.confirm(`删除用户级 MCP 服务“${item.name}”？`)) return;
+                onDelete: async (item: CapabilityView) => {
+                  if (
+                    !(await requestConfirm({
+                      title: `删除用户级 MCP 服务「${item.name}」？`,
+                      confirmLabel: "删除",
+                      tone: "danger",
+                    }))
+                  )
+                    return;
                   void actions.deleteUserMcp(item.name);
                 },
                 deleting: busy === "mcp-user-delete",

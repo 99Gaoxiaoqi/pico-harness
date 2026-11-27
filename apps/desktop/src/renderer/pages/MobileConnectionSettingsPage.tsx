@@ -14,6 +14,7 @@ import type {
   RemoteWorkspace,
 } from "../../preload/remote-management-contract.js";
 import { Button, InlineNotice } from "../components.js";
+import { requestConfirm } from "../confirm-dialog.js";
 import { MobileRecoveryNotice } from "../MobileRecoveryNotice.js";
 import { SwitchField, TextField } from "../ui-controls.js";
 import { RemoteSupervisionStatus } from "../RemoteSupervisionStatus.js";
@@ -382,14 +383,16 @@ export function MobileConnectionSettingsPage() {
               )}
               <form
                 className="mobile-config-form"
-                onSubmit={(event) => {
+                onSubmit={async (event) => {
                   event.preventDefault();
                   if (!api || active) return;
                   if (
                     config?.connectionMode === "direct" &&
-                    !window.confirm(
-                      "将此电脑的手机连接从 HTTPS/WSS 直连切换到公网 Relay？现有设备仍需遵守本机授权。",
-                    )
+                    !(await requestConfirm({
+                      title: "切换到公网 Relay？",
+                      body: "将此电脑的手机连接从 HTTPS/WSS 直连切换到公网 Relay。现有设备仍需遵守本机授权。",
+                      confirmLabel: "切换",
+                    }))
                   )
                     return;
                   void run(async () => {

@@ -14,6 +14,7 @@ import {
 import { ArrowLeft, Bot, ChevronRight, Plus } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Button, EmptyState, InlineNotice } from "../components.js";
+import { requestConfirm } from "../confirm-dialog.js";
 import {
   createSubagentDraft,
   limitSubagentText,
@@ -224,9 +225,12 @@ export function SubagentSettingsPage({ snapshot, onUpdate }: SubagentSettingsPag
               preset
                 ? async () => {
                     if (
-                      !window.confirm(
-                        `删除子 Agent“${preset.name}”？此操作不会删除已完成的任务记录。`,
-                      )
+                      !(await requestConfirm({
+                        title: `删除子 Agent「${preset.name}」？`,
+                        body: "此操作不会删除已完成的任务记录。",
+                        confirmLabel: "删除",
+                        tone: "danger",
+                      }))
                     )
                       return;
                     if (await persist(snapshot.presets.filter((item) => item.id !== preset.id)))

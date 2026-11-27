@@ -1,5 +1,6 @@
 import "./PendingSendNotice.css";
 import { useNavigate } from "react-router-dom";
+import { requestConfirm } from "./confirm-dialog.js";
 import type { PendingSendEntry } from "./pending-send.js";
 import type { RuntimeStore } from "./runtime.js";
 import { sessionHref } from "./workspace-session.js";
@@ -19,14 +20,17 @@ export function PendingSendNotice({
       navigate(sessionHref({ workspacePath: result.workspacePath, sessionId: result.sessionId }));
     }
   };
-  const abandon = () => {
+  const abandon = async () => {
     if (
-      window.confirm(
-        "原请求可能已经执行。放弃恢复会删除待确认记录并保留文字草稿，不会取消 Host 上的执行。仍要放弃恢复吗？",
-      )
-    ) {
-      runtime.actions.abandonPendingSend?.(entry.scope.sourceKey);
-    }
+      !(await requestConfirm({
+        title: "放弃恢复这条发送？",
+        body: "原请求可能已经执行。放弃恢复会删除待确认记录并保留文字草稿，不会取消 Host 上的执行。",
+        confirmLabel: "放弃恢复",
+        tone: "danger",
+      }))
+    )
+      return;
+    runtime.actions.abandonPendingSend?.(entry.scope.sourceKey);
   };
   return (
     <div className="pending-send-notice" role="status">
@@ -45,7 +49,7 @@ export function PendingSendNotice({
       >
         {sending ? "正在确认…" : "恢复发送结果"}
       </button>
-      <button type="button" disabled={sending} onClick={abandon}>
+      <button type="button" disabled={sending} onClick={() => void abandon()}>
         放弃恢复
       </button>
     </div>

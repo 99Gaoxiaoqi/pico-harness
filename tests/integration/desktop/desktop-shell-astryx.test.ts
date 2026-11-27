@@ -128,6 +128,7 @@ import {createRoot} from "react-dom/client";
 import {MemoryRouter, Routes, Route, useLocation} from "react-router-dom";
 import {AppShell} from "./apps/desktop/src/renderer/AppShell.tsx";
 import {ArchiveUndoProvider} from "./apps/desktop/src/renderer/archive-undo.tsx";
+import {ConfirmDialogHost} from "./apps/desktop/src/renderer/confirm-dialog.tsx";
 import {RuntimeContext} from "./apps/desktop/src/renderer/runtime-context.tsx";
 import {previewData} from "./apps/desktop/src/renderer/fixture.ts";
 import {PicoTheme} from "./apps/desktop/src/renderer/astryx-provider.tsx";
@@ -157,11 +158,8 @@ const scenarioData = {
 const target = document.getElementById("app");
 target.style.height = "100%";
 const writes = [];
-let confirmResult = true;
-let confirmCalls = 0;
 let failArchive = false;
 let failUnregister = false;
-window.confirm = () => { confirmCalls++; return confirmResult; };
 const runtime = {
   data: scenarioData, preview: false, busy: false, message: "",
   actions: {
@@ -213,7 +211,7 @@ const waitFor = async (predicate, message, timeout = 5000) => {
     await frame();
   }
 };
-const render = () => root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter initialEntries={["/task/new"]}><Routes><Route element={<ArchiveUndoProvider><AppShell/></ArchiveUndoProvider>}><Route path="*" element={<Page/>}/></Route></Routes></MemoryRouter></RuntimeContext></PicoTheme>);
+const render = () => root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter initialEntries={["/task/new"]}><Routes><Route element={<ArchiveUndoProvider><AppShell/></ArchiveUndoProvider>}><Route path="*" element={<Page/>}/></Route></Routes></MemoryRouter></RuntimeContext><ConfirmDialogHost/></PicoTheme>);
 const projectMenu = () => document.querySelector('[role="menu"][aria-label="项目操作 maka-harness"]');
 const projectItem = (name) => [...projectMenu().querySelectorAll('[role="menuitem"]')].find(item => item.textContent.includes(name));
 const clickProjectItem = async (name) => {
@@ -221,6 +219,14 @@ const clickProjectItem = async (name) => {
   await frame();
   check(projectItem(name), "Missing project action " + name);
   await act(async () => projectItem(name).click());
+  await frame();
+};
+const confirmDialog = () => document.querySelector("dialog.confirm-dialog[open]");
+const confirmAction = async (label) => {
+  await waitFor(() => Boolean(confirmDialog()), "Missing in-app confirmation dialog");
+  const action = [...confirmDialog().querySelectorAll("button")].find(item => item.textContent.trim() === label);
+  check(action, "Missing confirmation action " + label);
+  await act(async () => action.click());
   await frame();
 };
 async function scenario() {
@@ -321,10 +327,8 @@ async function scenario() {
   writes.length = 0;
   const activeLink = [...document.querySelectorAll('.sidebar-task-link')].find(link => link.getAttribute("href").includes(encodeURIComponent(mainPath)));
   await act(async () => activeLink.click());
-  const confirmsBeforeArchive = confirmCalls;
-  confirmResult = false;
   await clickProjectItem("归档聊天");
-  check(confirmCalls === confirmsBeforeArchive, "Archiving chats never asks for confirmation");
+  check(!confirmDialog(), "Archiving chats never asks for confirmation");
   check(JSON.stringify(writes) === JSON.stringify([
     ["archive", {workspacePath: mainPath, sessionId: running.id}, true],
     ["archive", {workspacePath: linkedPath, sessionId: idle.id}, true],
@@ -339,16 +343,17 @@ async function scenario() {
   await click("新建任务 maka-harness");
   check(document.querySelector('[data-page]').dataset.workspace === mainPath, "Empty project still creates tasks in the primary folder");
   writes.length = 0;
-  confirmResult = false;
   await clickProjectItem("移除项目");
+  await confirmAction("取消");
   check(writes.length === 0, "Cancelling project removal makes no changes");
-  confirmResult = true;
   failUnregister = true;
   await clickProjectItem("移除项目");
+  await confirmAction("移除");
   check(writes.length === 1 && runtime.data.workspaces.length === 4, "Failed removal stops before unregistering other worktrees");
   failUnregister = false;
   writes.length = 0;
   await clickProjectItem("移除项目");
+  await confirmAction("移除");
   check(JSON.stringify(writes) === JSON.stringify([["unregister", mainPath], ["unregister", linkedPath], ["unregister", emptyWorktreePath]]), "Removal unregisters every project folder, including an empty worktree");
   check(runtime.data.workspaces.length === 1 && runtime.data.workspaces[0].path === clonePath, "Removing a project preserves other projects");
   check(!document.querySelector('[aria-label="项目操作 maka-harness"]') && document.querySelector('[data-page]').dataset.workspace === "", "Removed project disappears and selected workspace is cleared");

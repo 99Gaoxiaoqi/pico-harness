@@ -20,6 +20,7 @@ import {
 } from "react-router-dom";
 import { AppShell } from "./AppShell.js";
 import { ArchiveUndoProvider } from "./archive-undo.js";
+import { ConfirmDialogHost } from "./confirm-dialog.js";
 import { UserMemorySettingsPage } from "./pages/UserMemorySettingsPage.js";
 import { ProviderPage } from "./ProviderPage.js";
 import { Button, EmptyState, InlineNotice, PreviewBadge } from "./components.js";
@@ -77,6 +78,7 @@ export function DesktopApp() {
       <HashRouter>
         <AppStateRouter />
       </HashRouter>
+      <ConfirmDialogHost />
     </RuntimeContext.Provider>
   );
 }

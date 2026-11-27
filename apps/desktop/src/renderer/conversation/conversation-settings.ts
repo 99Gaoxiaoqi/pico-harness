@@ -1,5 +1,6 @@
 import type { RuntimeUserDefaults } from "@pico/protocol";
 import type { RuntimeStore, RuntimeActions } from "../runtime.js";
+import { requestConfirm } from "../confirm-dialog.js";
 import { workspaceSessionKey, type WorkspaceSessionRef } from "../workspace-session.js";
 
 /** Shared by composer controls and slash actions, including Plan approval transitions. */
@@ -37,7 +38,14 @@ export async function applyConversationSettings(
     next.collaborationMode !== "plan" &&
     approval?.kind === "plan"
   ) {
-    if (!window.confirm("当前计划仍待审批。退出 Plan 将拒绝并放弃这份计划，是否继续？"))
+    if (
+      !(await requestConfirm({
+        title: "退出 Plan 模式？",
+        body: "当前计划仍待审批。退出 Plan 将拒绝并放弃这份计划。",
+        confirmLabel: "退出 Plan",
+        tone: "danger",
+      }))
+    )
       return false;
     const accepted = await runtime.actions.respondPlan({
       workspacePath: ref.workspacePath,
