@@ -452,6 +452,11 @@ export function MemoryPage({
   }, [targetItem, targetDetail, resolvedTarget?.status]);
   const [editor, setEditor] = useState<MemoryEditor>();
   const [editorError, setEditorError] = useState("");
+  const [editorErrorRetryable, setEditorErrorRetryable] = useState(false);
+  const reportEditorError = (message: string, retryable = false) => {
+    setEditorError(message);
+    setEditorErrorRetryable(retryable);
+  };
   useEffect(() => {
     if (
       resolvedTarget?.status !== "ready" ||
@@ -508,6 +513,7 @@ export function MemoryPage({
     setDraft(undefined);
     setEditor(undefined);
     setEditorError("");
+    setEditorErrorRetryable(false);
     setQuery("");
     setCreationNotice("");
   }, [data.workspacePath]);
@@ -691,7 +697,7 @@ export function MemoryPage({
     if (!editor || editor.id !== item.itemId || !editor.content.trim() || busy) return;
     const submitted = editor;
     if (submitted.workspacePath !== data.workspacePath) return;
-    setEditorError("");
+    reportEditorError("");
     const patch: Parameters<typeof actions.updateMemoryItem>[2] = {
       content: submitted.content.trim(),
       statementType: submitted.statementType,
@@ -710,7 +716,7 @@ export function MemoryPage({
         (end !== null && end <= start) ||
         (submitted.timeChoice === "interval" && end === null)
       ) {
-        setEditorError(
+        reportEditorError(
           "请填写有效的事件开始时间；结束时间必须晚于开始时间，时间区间必须有结束时间。",
         );
         return;
@@ -725,7 +731,7 @@ export function MemoryPage({
       const updated = await actions.updateMemoryItem(submitted.id, submitted.version, patch);
       if (workspaceRef.current !== submitted.workspacePath) return;
       if (!updated) {
-        setEditorError("更正未保存，请检查内容或刷新后重试。输入已保留。");
+        reportEditorError("更正未保存，输入已保留。请检查内容后重试。", true);
         return;
       }
       setEditor((current) => (current === submitted ? undefined : current));
@@ -734,7 +740,7 @@ export function MemoryPage({
       clearPreview();
     } catch {
       if (workspaceRef.current === submitted.workspacePath)
-        setEditorError("更正未保存，请检查内容或刷新后重试。输入已保留。");
+        reportEditorError("更正未保存，输入已保留。请检查内容后重试。", true);
     }
   };
   const choosePanel = (panel: PanelId) => {
@@ -973,7 +979,20 @@ export function MemoryPage({
                     )}
                   </>
                 )}
-                {editorError && <InlineNotice tone="error">{editorError}</InlineNotice>}
+                {editorError && (
+                  <InlineNotice tone="error">
+                    {editorError}
+                    {editorErrorRetryable && (
+                      <Button
+                        variant="quiet"
+                        disabled={Boolean(busy)}
+                        onClick={() => void save(item)}
+                      >
+                        重试保存
+                      </Button>
+                    )}
+                  </InlineNotice>
+                )}
               </div>
             ) : (
               <p>{item.content}</p>
@@ -1012,7 +1031,7 @@ export function MemoryPage({
                     disabled={Boolean(busy) || Boolean(editor && editor.id !== item.itemId)}
                     onClick={() => {
                       if (!data.workspacePath || (editor && editor.id !== item.itemId)) return;
-                      setEditorError("");
+                      reportEditorError("");
                       setEditor({
                         id: item.itemId,
                         version: item.version,

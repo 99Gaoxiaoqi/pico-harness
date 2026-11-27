@@ -87,30 +87,31 @@ function modelCapability(provider: ProviderView, model: string): Record<string, 
     : {};
 }
 
+const compactNumber = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumFractionDigits: 0,
+});
+
 function modelCapabilitySummary(provider: ProviderView, model: string): string {
   const capability = modelCapability(provider, model);
-  const parts = [provider.models.includes(model) ? "已知模型" : "服务商目录"];
+  const parts: string[] = [];
   if (capability.displayName && capability.displayName !== model) parts.push(model);
   if (typeof capability.contextWindowTokens === "number") {
-    const count = Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 0 }).format(
-      capability.contextWindowTokens,
-    );
-    parts.push(
-      `上下文 ${count}${capability.contextSource === "config" ? "（已配置）" : capability.contextSource === "catalog_snapshot" ? "（目录）" : "（Pico 运行默认）"}`,
-    );
+    parts.push(`上下文 ${compactNumber.format(capability.contextWindowTokens)}`);
   }
-  parts.push(
-    typeof capability.maxOutputTokens === "number"
-      ? `最大输出 ${Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 0 }).format(capability.maxOutputTokens)}${capability.outputSource === "catalog_snapshot" ? "（目录）" : "（已配置）"}`
-      : "最大输出未知",
-  );
+  if (typeof capability.maxOutputTokens === "number") {
+    parts.push(`最大输出 ${compactNumber.format(capability.maxOutputTokens)}`);
+  }
   const supportLabel = (name: string, support: unknown) =>
-    `${name}${support === true ? "支持" : support === false ? "不支持" : "未知"}`;
-  parts.push(supportLabel("视觉", capability.vision));
-  parts.push(supportLabel("思考", capability.reasoning));
-  parts.push(supportLabel("工具", capability.toolCall));
-  if (capability.metadataSource === "models_dev_snapshot") parts.push("models.dev 目录");
-  return parts.join(" · ");
+    support === true ? `${name} ✓` : support === false ? `${name} ✗` : undefined;
+  for (const label of [
+    supportLabel("视觉", capability.vision),
+    supportLabel("思考", capability.reasoning),
+    supportLabel("工具", capability.toolCall),
+  ]) {
+    if (label) parts.push(label);
+  }
+  return parts.length ? parts.join(" · ") : "目录未提供参数，以实际运行为准";
 }
 
 function providerApiKeyEnv(provider: ProviderView | undefined, protocol: ProviderProtocol): string {
@@ -146,7 +147,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
   const handleDeleteProvider = async (provider: ProviderView) => {
     if (
       !(await requestConfirm({
-        title: `删除服务商/渠道「${provider.id}」？`,
+        title: `删除连接「${provider.id}」？`,
         body: "已有会话不会被删除，但恢复时可能需要重新选择模型。",
         confirmLabel: "删除",
         tone: "danger",
@@ -190,7 +191,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
       )}
       {config.supported && !config.writable && !data.notices.providers && (
         <InlineNotice tone="warning">
-          模型服务商配置没有完整加载，已暂停编辑以避免覆盖更新的配置。请重新加载后再试。
+          模型连接配置没有完整加载，已暂停编辑以避免覆盖更新的配置。请重新加载后再试。
         </InlineNotice>
       )}
 
@@ -335,7 +336,7 @@ export function ProviderPage({ runtime }: { readonly runtime: RuntimeStore }) {
       )}
 
       <InlineNotice tone="neutral">
-        登录同步尚未开放。模型服务商配置仅在当前设备上由 App 和 TUI 共用。API Key 保存在
+        登录同步尚未开放。模型连接配置仅在当前设备上由 App 和 TUI 共用。API Key 保存在
         ~/.pico/config.json，文件权限为 0600。
       </InlineNotice>
 
@@ -755,11 +756,11 @@ function ProviderEditorDialog({
       aria-labelledby="provider-editor-title"
       aria-describedby="provider-editor-detail"
     >
-      <h2 id="provider-editor-title">{provider ? `编辑 ${provider.id}` : "添加模型服务商"}</h2>
+      <h2 id="provider-editor-title">{provider ? `编辑 ${provider.id}` : "添加连接"}</h2>
       <p id="provider-editor-detail">
         {provider?.auth === "none"
           ? "此连接无需 API Key。修改模型或地址后，将继续使用匿名请求。"
-          : "配置服务商或网关渠道。保存后，在服务商卡片中点击“API Key”添加凭证。"}
+          : "服务商或中转渠道，以下统称连接。保存后，在连接卡片中点击“API Key”添加凭证。"}
       </p>
 
       <IconButton
@@ -772,9 +773,9 @@ function ProviderEditorDialog({
 
       <form className="provider-form" onSubmit={(event) => void handleSubmit(event)}>
         <div className="settings-field">
-          <span>服务商 / 渠道 ID</span>
+          <span>连接 ID</span>
           <TextField
-            label="服务商 / 渠道 ID"
+            label="连接 ID"
             required
             value={id}
             disabled={Boolean(provider)}
@@ -811,11 +812,11 @@ function ProviderEditorDialog({
             placeholder={protocolBaseURLPlaceholders[protocol]}
             onChange={(event) => setBaseURL(event.currentTarget.value)}
           />
-          <small>填写与所选协议兼容的服务商、网关或团队渠道地址。</small>
+          <small>填写与所选协议兼容的服务商或中转渠道地址。</small>
         </div>
         <div className="settings-field provider-discovery-toggle">
           <CheckboxField
-            label="允许从服务商动态发现模型"
+            label="允许从连接动态发现模型"
             labelHidden={false}
             checked={discoverModels}
             disabled={protocol !== "openai"}
@@ -841,7 +842,7 @@ function ProviderEditorDialog({
 
           <Button type="submit" variant="primary" disabled={busy}>
             <Check aria-hidden="true" size={16} />
-            {provider ? "保存更改" : "添加服务商"}
+            {provider ? "保存更改" : "添加连接"}
           </Button>
         </div>
       </form>
@@ -902,7 +903,7 @@ function CredentialDialog({
     if (
       !(await requestConfirm({
         title: `删除 ${provider.id} 保存在当前设备上的 API Key？`,
-        body: "删除后，使用该服务商的新请求将无法发送，直到重新配置凭证。",
+        body: "删除后，使用该连接的新请求将无法发送，直到重新配置凭证。",
         confirmLabel: "删除 API Key",
         tone: "danger",
         requireText: {

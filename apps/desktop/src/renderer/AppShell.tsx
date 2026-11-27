@@ -43,7 +43,14 @@ import { useArchiveUndo } from "./archive-undo.js";
 import { requestConfirm } from "./confirm-dialog.js";
 import { PreviewBadge } from "./components.js";
 import { removePersistentDraft } from "./conversation/index.js";
-import type { ApprovalView, PromptView, RunView, SessionView, WorkspaceView } from "./model.js";
+import type {
+  ApprovalView,
+  AppRuntimePhase,
+  PromptView,
+  RunView,
+  SessionView,
+  WorkspaceView,
+} from "./model.js";
 import {
   appPrimaryNavigation,
   settingsNavigationGroups,
@@ -77,7 +84,7 @@ interface SidebarProjectGroup {
 
 export function AppShell() {
   const runtime = useRuntime();
-  const { data, preview, message, actions, busy } = runtime;
+  const { data, preview, message, actions, busy, connection } = runtime;
   const hasPendingSends =
     runtime.pendingSends?.some((entry) => entry.scope.picoHome === data.picoHome) ?? false;
   const location = useLocation();
@@ -301,7 +308,11 @@ export function AppShell() {
       mobileNav={{ breakpoint: "none", hasToggle: false }}
       sideNav={
         settingsRoute ? (
-          <SettingsSidebar workspacePath={navigationWorkspacePath} onKeyDown={handleNavKeys} />
+          <SettingsSidebar
+            workspacePath={navigationWorkspacePath}
+            onKeyDown={handleNavKeys}
+            connection={connection}
+          />
         ) : (
           <aside
             className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : ""}`}
@@ -417,9 +428,11 @@ export function AppShell() {
                 <Settings aria-hidden="true" />
                 <span className="sidebar__label">设置</span>
               </NavLink>
-              <div className="runtime-health">
-                <span /> Runtime 已连接
-              </div>
+              {connection.kind === "ready" && (
+                <div className="runtime-health">
+                  <span /> Runtime 已连接
+                </div>
+              )}
             </div>
           </aside>
         )
@@ -489,9 +502,11 @@ export function AppShell() {
 function SettingsSidebar({
   workspacePath,
   onKeyDown,
+  connection,
 }: {
   readonly workspacePath?: string;
   readonly onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
+  readonly connection: AppRuntimePhase;
 }) {
   const returnTo = window.sessionStorage.getItem("pico.settings-return-to");
   const returnHref =
@@ -550,9 +565,11 @@ function SettingsSidebar({
           </nav>
         ))}
       </div>
-      <div className="runtime-health">
-        <span /> Runtime 已连接
-      </div>
+      {connection.kind === "ready" && (
+        <div className="runtime-health">
+          <span /> Runtime 已连接
+        </div>
+      )}
     </aside>
   );
 }

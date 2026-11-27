@@ -373,40 +373,53 @@ export function MobileConnectionSettingsPage() {
             </dl>
           ) : (
             <>
-              {active && (
-                <p className="mobile-note">先关闭上方连接开关，再编辑设置。现有任务会继续运行。</p>
-              )}
               {config?.connectionMode === "direct" && (
                 <InlineNotice tone="warning">
-                  当前使用已有直连配置。保存下方设置将明确切换到公网 Relay；请先停止手机连接。
+                  当前使用已有直连配置。保存后将切换到公网 Relay 并重启连接，现有设备需要重新授权。
                 </InlineNotice>
               )}
               <form
                 className="mobile-config-form"
                 onSubmit={async (event) => {
                   event.preventDefault();
-                  if (!api || active) return;
+                  if (!api) return;
+                  const switchingRelay = config?.connectionMode === "direct";
                   if (
-                    config?.connectionMode === "direct" &&
+                    switchingRelay &&
                     !(await requestConfirm({
                       title: "切换到公网 Relay？",
-                      body: "将此电脑的手机连接从 HTTPS/WSS 直连切换到公网 Relay。现有设备仍需遵守本机授权。",
+                      body: "切换后会重启手机连接，现有设备需要重新授权。",
                       confirmLabel: "切换",
                     }))
                   )
                     return;
+                  const wasActive = active;
                   void run(async () => {
-                    setSnapshot(
-                      unwrap(
-                        await api.configure({
-                          relayUrl: relayUrl.trim(),
-                          workspaces: selectedPaths.map((path) => ({ path })),
-                        }),
-                      ),
-                    );
+                    if (wasActive) await api.stop({});
+                    try {
+                      setSnapshot(
+                        unwrap(
+                          await api.configure({
+                            relayUrl: relayUrl.trim(),
+                            workspaces: selectedPaths.map((path) => ({ path })),
+                          }),
+                        ),
+                      );
+                    } catch (failure) {
+                      if (wasActive) await api.start({});
+                      throw failure;
+                    }
+                    if (wasActive) setSnapshot(unwrap(await api.start({})));
                     setQr(undefined);
                     setEditingConfiguration(false);
                     configHeading.current?.focus({ preventScroll: true });
+                    actions.showMessage?.(
+                      wasActive
+                        ? switchingRelay
+                          ? "已切换到 Relay，连接已重启。"
+                          : "连接设置已保存，连接已重启。"
+                        : "连接设置已保存。",
+                    );
                   });
                 }}
               >
@@ -418,15 +431,15 @@ export function MobileConnectionSettingsPage() {
                     placeholder="https://relay.example.com"
                     value={relayUrl}
                     required
-                    disabled={busy || active || !api}
+                    disabled={busy || !api}
                     onValueChange={setRelayUrl}
                     autoComplete="off"
                   />
                 </div>
                 <p className="mobile-note">
-                  填写部署时绑定这台电脑的中继地址。保存后，开启上方连接开关。
+                  填写部署时绑定这台电脑的中继地址。保存后会重启连接以应用设置。
                 </p>
-                <fieldset className="mobile-workspace-picker" disabled={busy || active || !api}>
+                <fieldset className="mobile-workspace-picker" disabled={busy || !api}>
                   <legend>允许手机访问的项目</legend>
                   {availableWorkspaces.length === 0 && (
                     <p>
@@ -455,16 +468,11 @@ export function MobileConnectionSettingsPage() {
                   <Button
                     type="submit"
                     variant="primary"
-                    disabled={
-                      busy || active || !api || !relayUrl.trim() || selectedPaths.length === 0
-                    }
+                    disabled={busy || !api || !relayUrl.trim() || selectedPaths.length === 0}
                   >
                     保存连接设置
                   </Button>
-                  <Button
-                    disabled={busy || active}
-                    onClick={() => void actions.registerWorkspace()}
-                  >
+                  <Button disabled={busy} onClick={() => void actions.registerWorkspace()}>
                     添加本机项目
                   </Button>
                 </div>
