@@ -1431,9 +1431,13 @@ export class RuntimeRun {
         try {
           await this.finish(status, runtimeFailureReason(error));
         } catch (finishError) {
+          // Preserve the run's own failure first: the terminal fact is recoverable, so a vague
+          // aggregate message must not erase what actually failed (abort, provider error, or a
+          // tool dispatched without its result). The next admission reconciles this run from its
+          // durable facts and seals it as interrupted.
           throw new AggregateError(
             [error, finishError],
-            "Agent run failed and its canonical terminal fact could not be persisted",
+            `Agent run failed: ${describeRuntimeError(error)}. Its canonical terminal fact could not be persisted (${describeRuntimeError(finishError)}); the next session admission reconciles the run from its durable facts.`,
             { cause: finishError },
           );
         }
@@ -3677,6 +3681,14 @@ function runtimeFailureReason(error: unknown): string {
   if (providerFailure !== undefined) return providerFailure;
   const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   return detail.slice(0, 1_000);
+}
+
+/** One-line bounded summary for user-visible aggregate messages. */
+function describeRuntimeError(error: unknown): string {
+  const detail = (error instanceof Error ? `${error.name}: ${error.message}` : String(error))
+    .replaceAll(/\s+/gu, " ")
+    .trim();
+  return detail.slice(0, 500) || "unknown error";
 }
 
 function runtimeCommitReceipt(result: RuntimeEventStoreAppendResult): CommitReceipt {
