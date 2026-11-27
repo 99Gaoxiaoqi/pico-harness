@@ -17,7 +17,7 @@ import {
 import type { AtomicMemoryStore } from "@pico/core/atomic-memory-runtime-contracts";
 import { memoryTextContainsSecret } from "@pico/runtime/atomic-memory/extraction-evidence";
 import { redactSensitiveText } from "@pico/runtime/sensitive-data-redaction";
-import { raceWithDeadlineReject } from "@pico/runtime/deadline";
+import { raceWithDeadline, raceWithDeadlineReject } from "@pico/runtime/deadline";
 import type { SqliteRuntimeEventStore } from "@pico/storage/sqlite/sqlite-runtime-event-store";
 import { canonicalizeWorkspacePath } from "@pico/storage/workspace-path";
 
@@ -162,6 +162,11 @@ export interface TaskExperienceRuntimeOptions {
     readonly reason: string;
     readonly throughSequence: number;
   }) => void;
+  /** @internal Verification knob; production uses the module foreground/background budgets. */
+  readonly collectionBudgets?: {
+    readonly foregroundMs: number;
+    readonly backgroundMs: number;
+  };
   readonly validateReuse?: (input: {
     readonly candidate: TaskExperienceCandidate;
     readonly task: TaskExperienceTask;
@@ -170,6 +175,14 @@ export interface TaskExperienceRuntimeOptions {
     readonly start?: RuntimeToolStartedEvent;
   }) => Promise<Pick<TaskExperienceReuse, "adoption" | "validation" | "sources">>;
 }
+
+/** Foreground turn paths wait only briefly; work continues behind them to this hard cap. */
+const COLLECTION_FOREGROUND_MS = 100;
+/**
+ * A pass over one journal page costs hundreds of SQLite reads. 100ms was below that cost on
+ * loaded hosts, so progress was discarded (and diagnosed) on every capture after a restart.
+ */
+const COLLECTION_BACKGROUND_MS = 10_000;
 
 /** Canonical journal remains the foreground authority. This bounded projection is cursor-recoverable. */
 export class TaskExperienceRuntime {
@@ -181,76 +194,89 @@ export class TaskExperienceRuntime {
   private settingsVersion = 0;
   private deletionRevision = 0;
   private inFlight: Promise<void> | undefined;
-  constructor(private readonly options: TaskExperienceRuntimeOptions) {}
+  private tail: Promise<void> = Promise.resolve();
+  private readonly budgets: { readonly foregroundMs: number; readonly backgroundMs: number };
+  constructor(private readonly options: TaskExperienceRuntimeOptions) {
+    this.budgets = options.collectionBudgets ?? {
+      foregroundMs: COLLECTION_FOREGROUND_MS,
+      backgroundMs: COLLECTION_BACKGROUND_MS,
+    };
+  }
 
   async admit(runId: string): Promise<void> {
     this.runId = runId;
-    await this.bounded("admit", async (check) => {
-      if (!(await this.allowed(check)) || runId.startsWith("fork-bootstrap:")) return;
-      if (this.options.hostRunId && this.options.session.runtimeEventStore) {
-        const run = await this.options.session.runtimeEventStore.readRun(
-          this.options.session.id,
-          runId,
-        );
+    await this.foreground(
+      this.bounded("admit", async (check) => {
+        if (!(await this.allowed(check)) || runId.startsWith("fork-bootstrap:")) return;
+        if (this.options.hostRunId && this.options.session.runtimeEventStore) {
+          const run = await this.options.session.runtimeEventStore.readRun(
+            this.options.session.id,
+            runId,
+          );
+          check();
+          const starts = run.filter((event) => event.kind === "run.started");
+          if (
+            starts.length !== 1 ||
+            starts[0]?.kind !== "run.started" ||
+            starts[0].sessionId !== this.options.session.id ||
+            canonicalizeWorkspacePath(starts[0].data.workDir) !==
+              canonicalizeWorkspacePath(this.options.workDir)
+          )
+            throw new Error("canonical_run_binding_unavailable");
+          const existing = await this.options.store.taskExperiences.readTaskExperienceRunBinding?.(
+            this.options.workspaceKey,
+            this.options.session.id,
+            runId,
+          );
+          check();
+          if (existing && existing.hostRunId !== this.options.hostRunId)
+            throw new Error("host_run_binding_conflict");
+          if (!existing) {
+            await this.options.store.taskExperiences.saveTaskExperienceRunBinding?.({
+              workspaceKey: this.options.workspaceKey,
+              sessionId: this.options.session.id,
+              executionRunId: runId,
+              hostRunId: this.options.hostRunId,
+              createdAt: Date.now(),
+            });
+            check();
+          }
+        }
+        const settings = await this.options.store.readSettings(this.options.workspaceKey);
+        const deletionRevision = await this.options.store.readDeletionRevision();
         check();
-        const starts = run.filter((event) => event.kind === "run.started");
-        if (
-          starts.length !== 1 ||
-          starts[0]?.kind !== "run.started" ||
-          starts[0].sessionId !== this.options.session.id ||
-          canonicalizeWorkspacePath(starts[0].data.workDir) !==
-            canonicalizeWorkspacePath(this.options.workDir)
-        )
-          throw new Error("canonical_run_binding_unavailable");
-        const existing = await this.options.store.taskExperiences.readTaskExperienceRunBinding?.(
+        if (!settings.enabled) return;
+        const inputEpoch =
+          await this.options.store.executionLearning.readExecutionLearningInputEpoch(
+            this.options.workspaceKey,
+          );
+        check();
+        this.inputEpoch = inputEpoch;
+        this.settingsVersion = settings.version;
+        this.deletionRevision = deletionRevision;
+        this.task = await this.options.store.taskExperiences.latestTaskExperienceTask(
           this.options.workspaceKey,
           this.options.session.id,
-          runId,
         );
         check();
-        if (existing && existing.hostRunId !== this.options.hostRunId)
-          throw new Error("host_run_binding_conflict");
-        if (!existing) {
-          await this.options.store.taskExperiences.saveTaskExperienceRunBinding?.({
-            workspaceKey: this.options.workspaceKey,
-            sessionId: this.options.session.id,
-            executionRunId: runId,
-            hostRunId: this.options.hostRunId,
-            createdAt: Date.now(),
-          });
-          check();
-        }
-      }
-      const settings = await this.options.store.readSettings(this.options.workspaceKey);
-      const deletionRevision = await this.options.store.readDeletionRevision();
-      check();
-      if (!settings.enabled) return;
-      const inputEpoch = await this.options.store.executionLearning.readExecutionLearningInputEpoch(
-        this.options.workspaceKey,
-      );
-      check();
-      this.inputEpoch = inputEpoch;
-      this.settingsVersion = settings.version;
-      this.deletionRevision = deletionRevision;
-      this.task = await this.options.store.taskExperiences.latestTaskExperienceTask(
-        this.options.workspaceKey,
-        this.options.session.id,
-      );
-      check();
-      this.cursor = this.task?.throughSequence ?? 0;
-    });
+        this.cursor = this.task?.throughSequence ?? 0;
+      }),
+    );
   }
 
   async capture(currentInputEventId?: string): Promise<void> {
     if (currentInputEventId) this.currentInputEventId = currentInputEventId;
-    if (this.inFlight) return this.inFlight;
-    const task = this.bounded("capture", (check) => this.collect(check));
+    await this.foreground(this.inFlight ?? this.startCapture());
+  }
+
+  private startCapture(): Promise<void> {
+    const runId = this.runId;
+    const task = this.bounded("capture", (check) => this.collect(check, runId));
     this.inFlight = task;
-    try {
-      await task;
-    } finally {
+    void task.then(() => {
       if (this.inFlight === task) this.inFlight = undefined;
-    }
+    });
+    return task;
   }
 
   async completed(runId: string): Promise<void> {
@@ -300,14 +326,41 @@ export class TaskExperienceRuntime {
     );
   }
 
-  private async bounded(phase: string, work: (check: () => void) => Promise<void>): Promise<void> {
+  /**
+   * Phases are serialized, and a pass is never discarded on the foreground budget: callers wait
+   * at most `foregroundMs`, then the same pass keeps running to the hard background cap so the
+   * persisted projection is updated instead of re-read from the same cursor on every trigger.
+   */
+  private bounded(phase: string, work: (check: () => void) => Promise<void>): Promise<void> {
+    const previous = this.tail;
+    const gate = Promise.withResolvers<void>();
+    this.tail = gate.promise;
+    return (async () => {
+      await previous;
+      try {
+        await this.run(phase, work);
+      } finally {
+        gate.resolve();
+      }
+    })();
+  }
+
+  private async foreground(pending: Promise<void>): Promise<void> {
+    await raceWithDeadline(pending, this.budgets.foregroundMs);
+  }
+
+  private async run(phase: string, work: (check: () => void) => Promise<void>): Promise<void> {
     let active = true;
-    const deadline = performance.now() + 100;
+    const deadline = performance.now() + this.budgets.backgroundMs;
     const check = () => {
       if (!active || performance.now() > deadline) throw new Error("collection_deadline");
     };
     try {
-      await raceWithDeadlineReject(work(check), 100, () => new Error("collection_deadline"));
+      await raceWithDeadlineReject(
+        work(check),
+        this.budgets.backgroundMs,
+        () => new Error("collection_deadline"),
+      );
     } catch (error) {
       try {
         this.options.onDiagnostic?.({
@@ -331,9 +384,9 @@ export class TaskExperienceRuntime {
     }
   }
 
-  private async collect(check: () => void): Promise<void> {
+  private async collect(check: () => void, runId: string): Promise<void> {
     const events = this.options.session.runtimeEventStore;
-    if (!events || !this.runId || !(await this.allowed(check))) return;
+    if (!events || !runId || !(await this.allowed(check))) return;
     this.inputEpoch = await this.options.store.executionLearning.readExecutionLearningInputEpoch(
       this.options.workspaceKey,
     );
@@ -350,10 +403,10 @@ export class TaskExperienceRuntime {
     const inputEventId = await this.validInputIdentity(
       events,
       this.currentInputEventId,
-      this.runId,
+      runId,
       check,
     );
-    if (inputEventId) await this.bindTaskInput(events, inputEventId, this.runId, check);
+    if (inputEventId) await this.bindTaskInput(events, inputEventId, runId, check);
     const entries = await events.readSessionEntriesPage(this.options.session.id, {
       afterSequence: this.cursor,
       limit: 250,
@@ -386,7 +439,7 @@ export class TaskExperienceRuntime {
       }
       if (event.kind === "message.committed") {
         const content = userRequest(event.data.message.content);
-        const sourceRunId = event.eventId === inputEventId ? this.runId : event.runId;
+        const sourceRunId = event.eventId === inputEventId ? runId : event.runId;
         const taskRunId =
           event.eventId === inputEventId ? (this.options.hostRunId ?? sourceRunId) : sourceRunId;
         const correctionIntent = correctionSignal(content);
