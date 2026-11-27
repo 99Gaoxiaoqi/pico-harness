@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -180,10 +180,16 @@ test("archive_read ports inspect/query/search/line/char over session-bound durab
     await compat.execute(JSON.stringify({ path: f.ref("text"), offset: 1, limit: 6000 })),
   );
   assert.ok(compatibilityPage.content.length > 1000);
-  await assert.rejects(
-    compat.execute(JSON.stringify({ path: "normal.txt", limit: 1001 })),
-    /limit 不能超过 1000/u,
+  const longFile = Array.from({ length: 1100 }, (_value, index) => `line ${index + 1}`).join("\n");
+  await writeFile(join(f.workDir, "normal.txt"), longFile, "utf8");
+  const clamped = await compat.execute(
+    JSON.stringify({ path: "normal.txt", offset: 1, limit: 1001 }),
   );
+  assert.match(clamped, /^1\tline 1\n/u);
+  assert.match(clamped, /\n1000\tline 1000\n/u);
+  assert.doesNotMatch(clamped, /1001\tline 1001/u);
+  assert.match(clamped, /limit 1001 超过普通文件上限 1000/u);
+  assert.match(clamped, /PARTIAL: /u);
   const wrongSession = new ArchiveReadTool(
     bindToolResultArchiveReader(f.session.runtimeEventStore!, "another"),
   );

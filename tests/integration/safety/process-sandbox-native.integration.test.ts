@@ -675,7 +675,7 @@ test(
     assert.equal(directRead.stdout, "one-shot-grep-secret\n");
     const roots = await WorkspaceRoots.create(fixture.workspace);
     roots.authorizeOnce(external);
-    setRgAvailable(true);
+    await setRgAvailable(true);
     const grep = new GrepTool(roots, {
       processSandbox: {
         profile: "read-only",
