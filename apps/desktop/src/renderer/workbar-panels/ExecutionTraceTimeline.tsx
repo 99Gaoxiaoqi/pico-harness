@@ -10,6 +10,7 @@ import type {
 import { partitionTimelineRuns } from "./inspector-timeline-state.js";
 import { displayExecutionError } from "../provider-retry.js";
 import { copyDiagnostic } from "../diagnostic-copy.js";
+import { costStatusLabels } from "../view-format.js";
 
 export const ExecutionTraceTimeline = memo(function ExecutionTraceTimeline({
   execution,
@@ -380,7 +381,7 @@ function StepDetail({
               </dd>
               <dt>费用</dt>
               <dd>
-                {step.costStatus === "included" ? "费用已包含" : money(step.costCNY)}
+                {step.costStatus === "included" ? costStatusLabels.included : money(step.costCNY)}
                 {step.costStatus === "estimated"
                   ? "（估算）"
                   : step.costStatus === "unknown" && step.costCNY !== undefined
@@ -455,7 +456,9 @@ function StepDetail({
                   </p>
                   <p>
                     输入 {tokens(attempt.inputTokens)} / 输出 {tokens(attempt.outputTokens)} Token ·{" "}
-                    {attempt.costStatus === "included" ? "费用已包含" : money(attempt.costCNY)}
+                    {attempt.costStatus === "included"
+                      ? costStatusLabels.included
+                      : money(attempt.costCNY)}
                     {attempt.costStatus === "estimated" ? "（估算）" : ""} · 用量依据：
                     {usageBasis(attempt.usageBasis)}
                   </p>

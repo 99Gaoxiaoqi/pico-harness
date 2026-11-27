@@ -74,6 +74,9 @@ import {
 
 const primaryNav = [{ ...appPrimaryNavigation[0], icon: Clock3 }] as const;
 
+/** Success/notice toasts clear themselves; the × button stays for early dismissal. */
+const TOAST_AUTO_DISMISS_MS = 6000;
+
 interface SidebarProjectGroup {
   readonly key: string;
   readonly label: string;
@@ -153,6 +156,13 @@ export function AppShell() {
   useEffect(() => {
     window.localStorage.setItem("pico.sidebar-collapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+  // Every new message restarts the countdown, so a later notice is never
+  // dismissed by an earlier timer.
+  useEffect(() => {
+    if (!message) return;
+    const timer = window.setTimeout(actions.dismissMessage, TOAST_AUTO_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [actions.dismissMessage, message]);
   // Route changes swap the whole page instantly; a short shared fade-up ties the
   // new surface to the navigation that produced it. Driven through WAAPI so the
   // timing comes from the motion tokens and no remount (and no data refetch) is

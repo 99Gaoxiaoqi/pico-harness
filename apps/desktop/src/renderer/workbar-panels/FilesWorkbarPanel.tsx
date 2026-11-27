@@ -1,6 +1,6 @@
 import { DropdownMenu, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import { IconButton, Button } from "../components.js";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   CircleAlert,
@@ -13,7 +13,57 @@ import {
 } from "lucide-react";
 import { ArtifactPreview } from "./ArtifactPreview.js";
 import { artifactPreviewKind, artifactPreviewLimit } from "./artifact-preview-model.js";
+import { copyDiagnostic } from "../diagnostic-copy.js";
 import { isMacPlatform, isWindowsPlatform } from "../platform.js";
+
+/**
+ * Failure row for the files panel: user copy, a visible retry action, and the
+ * raw details only behind an explicit diagnostic copy (UX-09 / UX-20).
+ */
+function PanelErrorRow({
+  message,
+  diagnostic,
+  onRetry,
+}: {
+  readonly message: string;
+  readonly diagnostic?: string | null;
+  readonly onRetry?: (() => void) | undefined;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  return (
+    <div className="tool-panel__error" role="alert">
+      <CircleAlert aria-hidden="true" size={14} />
+      <span className="tool-panel__error-message">{message}</span>
+      {(onRetry || diagnostic) && (
+        <span className="tool-panel__error-actions">
+          {onRetry && (
+            <Button variant="quiet" type="button" onClick={onRetry}>
+              重试
+            </Button>
+          )}
+          {diagnostic && (
+            <Button
+              variant="quiet"
+              type="button"
+              onClick={() => {
+                void copyDiagnostic(diagnostic).then(
+                  () => setCopyState("copied"),
+                  () => setCopyState("failed"),
+                );
+              }}
+            >
+              {copyState === "copied"
+                ? "已复制诊断"
+                : copyState === "failed"
+                  ? "复制失败 · 重试"
+                  : "复制诊断"}
+            </Button>
+          )}
+        </span>
+      )}
+    </div>
+  );
+}
 
 /** Cross-platform wording: macOS says Finder, Windows says File Explorer. */
 export function revealArtifactLabel(): string {
@@ -57,9 +107,13 @@ export interface FilesWorkbarPanelProps {
   readonly loading: boolean;
   readonly contentLoading?: boolean;
   readonly error?: string | null;
+  readonly errorDiagnostic?: string | null;
   readonly contentError?: string | null;
+  readonly contentDiagnostic?: string | null;
   readonly notice?: string | null;
   readonly onRefresh: () => void;
+  readonly onRetryError?: () => void;
+  readonly onRetryContent?: () => void;
   readonly onSelectArtifact: (artifactId: string) => void;
   readonly onBack: () => void;
   readonly onLoadChunk: (artifactId: string, offset: number) => void;
@@ -87,9 +141,13 @@ export function FilesWorkbarPanel({
   loading,
   contentLoading = false,
   error,
+  errorDiagnostic,
   contentError,
+  contentDiagnostic,
   notice,
   onRefresh,
+  onRetryError,
+  onRetryContent,
   onSelectArtifact,
   onBack,
   onLoadChunk,
@@ -142,10 +200,12 @@ export function FilesWorkbarPanel({
       </header>
 
       {error && (
-        <p className="tool-panel__error" role="alert">
-          <CircleAlert aria-hidden="true" size={14} />
-          {error}
-        </p>
+        <PanelErrorRow
+          key={`list:${errorDiagnostic ?? error}`}
+          message={error}
+          diagnostic={errorDiagnostic}
+          onRetry={onRetryError}
+        />
       )}
 
       {selected ? (
@@ -219,9 +279,12 @@ export function FilesWorkbarPanel({
               )}
             </header>
             {contentError ? (
-              <p className="tool-panel__error" role="alert">
-                {contentError}
-              </p>
+              <PanelErrorRow
+                key={`content:${contentDiagnostic ?? contentError}`}
+                message={contentError}
+                diagnostic={contentDiagnostic}
+                onRetry={onRetryContent}
+              />
             ) : contentLoading && !selectedContent ? (
               <p className="tool-panel__state" role="status">
                 正在读取文件内容…
