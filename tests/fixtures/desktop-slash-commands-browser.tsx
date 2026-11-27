@@ -845,14 +845,11 @@ async function planExitConfirm(decision: "取消" | "退出 Plan") {
       expectedSessionSequence: 8,
       controlEpoch: "e1",
     });
-    const cancelledExit = applyConversationSettings(runtime, ref, {}, {
-      collaborationMode: "agent",
-    });
+    const exitToAgent = { collaborationMode: "agent" as const };
+    const cancelledExit = applyConversationSettings(runtime, ref, {}, exitToAgent);
     await planExitConfirm("取消");
     check(!(await cancelledExit), "取消 Plan 退出仍写入");
-    const acceptedExit = applyConversationSettings(runtime, ref, {}, {
-      collaborationMode: "agent",
-    });
+    const acceptedExit = applyConversationSettings(runtime, ref, {}, exitToAgent);
     await planExitConfirm("退出 Plan");
     check(await acceptedExit, "确认 Plan 退出失败");
     check(
@@ -861,9 +858,14 @@ async function planExitConfirm(decision: "取消" | "退出 Plan") {
     );
     failPlan = true;
     const settingsCount = calls.filter((item) => item.method === "settings").length;
-    const failedExit = applyConversationSettings(runtime, ref, {}, {
-      collaborationMode: "research",
-    });
+    const failedExit = applyConversationSettings(
+      runtime,
+      ref,
+      {},
+      {
+        collaborationMode: "research",
+      },
+    );
     await planExitConfirm("退出 Plan");
     check(!(await failedExit), "审批失败仍报告模式切换成功");
     check(
