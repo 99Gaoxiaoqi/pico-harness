@@ -272,6 +272,39 @@ test("I4 strict seal 拒绝带 prepared 工具的终态，reconcile 先 T2 再�
   );
 });
 
+test("run 失败且终态被 prepared 工具阻塞时，错误保留原始失败并说明下次准入修复", async (context) => {
+  const scene = await createScene(context, "tool-recovery-blocked-seal");
+  const call = toolCall("call:blocked-seal");
+  await scene.run.commitMessages(scene.session, [assistantToolCallMessage(call)]);
+  await scene.run.recordToolStarted(call.id, call.name, call.arguments);
+
+  const failure = await scene.run
+    .run(async () => {
+      throw new Error("provider_stream_broken_fixture");
+    })
+    .then(
+      () => assert.fail("run must reject when its terminal fact cannot be sealed"),
+      (error: unknown) => error,
+    );
+  assert.ok(failure instanceof AggregateError);
+  assert.match(failure.message, /provider_stream_broken_fixture/u, "原始失败必须在首句");
+  assert.match(failure.message, /canonical terminal fact could not be persisted/u);
+  assert.match(failure.message, /prepared tool operation\(s\) without outcome/u);
+  assert.match(failure.message, /next session admission reconciles/u);
+  assert.equal(
+    (await readEvents(scene)).some((event) => event.kind === "run.terminal"),
+    false,
+    "阻塞时不得伪造终态",
+  );
+
+  assert.deepEqual(await reconcile(scene), [scene.run.runId]);
+  const events = await readEvents(scene);
+  const terminal = events.at(-1)!;
+  assert.equal(terminal.kind, "run.terminal");
+  assert.equal(terminal.data.status, "interrupted");
+  assert.equal(resultEventsFor(events, call.id)[0]?.data.recovery?.classification, "indeterminate");
+});
+
 test("I5 分类矩阵：同一 run 内 F1/F2 混合并存，逐调用分类唯一互斥", async (context) => {
   const scene = await createScene(context, "tool-recovery-matrix");
   const dispatchedCall = toolCall("call:matrix-dispatched");
