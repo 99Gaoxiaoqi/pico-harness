@@ -184,7 +184,7 @@ async function main() {
     fieldValue("连接") === "first" && fieldValue("模型") === "reasoner",
     "Default must be first selectable connection and offerable model",
   );
-  check(fieldValue("思考级别") === "", "Thinking must default to model default");
+  check(fieldValue("思考强度") === "", "Thinking must default to model default");
   await click("创建");
   check(
     writes.length === 0 && target.querySelector('[aria-invalid="true"]'),
@@ -203,15 +203,15 @@ async function main() {
     fieldValue("使用说明（可选）").trim().length === 1000,
     "Description must respect trimmed limit",
   );
-  await enter("思考级别", "high");
+  await enter("思考强度", "high");
   await enter("模型", "fast");
   check(!target.textContent?.includes("跟随模型默认"), "Non-thinking model must hide thinking row");
   await enter("模型", "reasoner");
-  check(fieldValue("思考级别") === "", "Model change must reset thinking");
-  await enter("思考级别", "high");
+  check(fieldValue("思考强度") === "", "Model change must reset thinking");
+  await enter("思考强度", "high");
   await enter("连接", "second");
   check(
-    fieldValue("模型") === "other" && fieldValue("思考级别") === "",
+    fieldValue("模型") === "other" && fieldValue("思考强度") === "",
     "Connection change must choose first model and clear thinking",
   );
   await enter("能力", "implementation");
@@ -330,7 +330,7 @@ async function main() {
   });
   await click("配置 Missing");
   check(
-    fieldValue("思考级别") === "",
+    fieldValue("思考强度") === "",
     "Unsupported saved thinking level must display model default",
   );
   await click("保存");

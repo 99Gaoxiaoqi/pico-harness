@@ -98,7 +98,7 @@ export function subagentProblem(preset: RuntimeConfiguredSubagent): string | und
     connection_disabled: "连接已停用",
     model_disabled: "模型不可用",
     model_unavailable: "模型不可用",
-    unsupported_thinking_level: "思考级别不可用",
+    unsupported_thinking_level: "思考强度不可用",
   };
   return messages[preset.availability.reason] ?? `暂不可用：${preset.availability.reason}`;
 }

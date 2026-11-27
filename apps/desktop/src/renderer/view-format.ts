@@ -17,6 +17,14 @@ export function formatCompact(value: number): string {
   );
 }
 
+/** Human-readable size for artifact and evidence metadata. */
+export function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "大小未知";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function formatRelative(value: number): string {
   const delta = Math.max(0, Date.now() - value);
   if (delta < 60_000) return "刚刚";

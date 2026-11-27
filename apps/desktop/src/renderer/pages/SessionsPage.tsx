@@ -35,7 +35,7 @@ export function SessionsPage() {
   const toggleArchive = async (session: SessionView, archived: boolean) => {
     const ref = { workspacePath: session.workspacePath, sessionId: session.id };
     const changed = await actions.setSessionArchived(ref, !archived);
-    if (changed && !archived) offerArchiveUndo(ref, session.title);
+    if (changed && !archived) offerArchiveUndo([ref], `「${session.title}」`);
   };
   return (
     <div className="page-stack">
@@ -98,14 +98,21 @@ export function SessionsPage() {
                   })}
                   session={session}
                   action={
-                    <Button
-                      variant="quiet"
-                      disabled={busy === "session-state" || running}
-                      title={running ? SESSION_ARCHIVE_RUNNING_HINT : undefined}
-                      onClick={() => void toggleArchive(session, archived)}
-                    >
-                      {archived ? "恢复" : "归档"}
-                    </Button>
+                    <span className="session-row-action__stack">
+                      <Button
+                        variant="quiet"
+                        disabled={busy === "session-state" || running}
+                        title={running ? SESSION_ARCHIVE_RUNNING_HINT : undefined}
+                        onClick={() => void toggleArchive(session, archived)}
+                      >
+                        {archived ? "恢复" : "归档"}
+                      </Button>
+                      {running && (
+                        <small className="session-row-action__hint">
+                          {SESSION_ARCHIVE_RUNNING_HINT}
+                        </small>
+                      )}
+                    </span>
                   }
                 />
               );

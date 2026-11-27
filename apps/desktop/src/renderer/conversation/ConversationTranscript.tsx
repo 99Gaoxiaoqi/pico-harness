@@ -28,6 +28,7 @@ import type {
   ThinkingItemView,
 } from "./types.js";
 import { copyText } from "../clipboard.js";
+import { formatByteSize } from "../view-format.js";
 import { conversationItemKey, mergeConversationItemGroups } from "./items.js";
 import { MarkdownText, referencedMediaIds } from "./MarkdownText.js";
 import { StreamingMarkdownText } from "./StreamingMarkdownText.js";
@@ -117,13 +118,6 @@ const toolResultStatusLabels: Readonly<Record<string, string>> = {
   cancelled: "已取消",
   interrupted: "已中断",
 };
-
-function formatByteSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return "大小未知";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 function StateIcon({ state }: { readonly state: ConversationProgressState }) {
   if (state === "done") return <CheckCircle2 aria-hidden="true" />;

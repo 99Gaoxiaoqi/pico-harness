@@ -959,8 +959,7 @@
   .sidebar--collapsed .sidebar-new-task span,
   .sidebar--collapsed .nav-link span,
   .sidebar--collapsed .sidebar-nav__caption,
-  .sidebar--collapsed .sidebar-tasks,
-  .sidebar--collapsed .runtime-health {
+  .sidebar--collapsed .sidebar-tasks {
     display: none;
   }
   .sidebar--collapsed .sidebar-new-task,
@@ -970,20 +969,6 @@
   }
   .sidebar--collapsed .sidebar__body {
     overflow: visible;
-  }
-  .runtime-health {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 0 10px 4px;
-    color: #777670;
-    font-size: 10px;
-  }
-  .runtime-health > span {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #58a074;
   }
   .workspace-frame {
     position: relative;
@@ -2171,6 +2156,17 @@
   }
   .session-row-action {
     margin-left: 12px;
+  }
+  .session-row-action__stack {
+    display: grid;
+    justify-items: end;
+    gap: 4px;
+  }
+  .session-row-action__hint {
+    max-width: 180px;
+    color: var(--ink-tertiary);
+    font-size: 11px;
+    text-align: right;
   }
   .automation-grid {
     display: grid;
@@ -3663,10 +3659,6 @@
   }
   .app-shell {
     background: var(--sidebar);
-  }
-  .runtime-health {
-    font-size: 10px;
-    opacity: 0.8;
   }
   .settings-sidebar {
     padding-top: 40px;

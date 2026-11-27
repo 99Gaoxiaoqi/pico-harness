@@ -10,7 +10,7 @@ import type {
 import { partitionTimelineRuns } from "./inspector-timeline-state.js";
 import { displayExecutionError } from "../provider-retry.js";
 import { copyDiagnostic } from "../diagnostic-copy.js";
-import { costStatusLabels } from "../view-format.js";
+import { costStatusLabels, formatByteSize } from "../view-format.js";
 
 export const ExecutionTraceTimeline = memo(function ExecutionTraceTimeline({
   execution,
@@ -912,7 +912,7 @@ function GoalEvidenceDetail({
                 {evidence.truncated ? " · 已截断" : ""}
                 <details>
                   <summary>来源 hash / 大小</summary>
-                  {evidence.sha256 ?? "未记录"} · {evidence.sizeBytes} bytes
+                  {evidence.sha256 ?? "未记录"} · {formatByteSize(evidence.sizeBytes)}
                 </details>
               </li>
             ))}

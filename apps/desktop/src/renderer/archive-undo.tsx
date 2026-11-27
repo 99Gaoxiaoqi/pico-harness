@@ -14,12 +14,14 @@ import { useRuntime } from "./runtime-context.js";
 import type { WorkspaceSessionRef } from "./workspace-session.js";
 
 interface ArchiveUndoEntry {
-  readonly target: WorkspaceSessionRef;
-  readonly title: string;
+  readonly targets: readonly WorkspaceSessionRef[];
+  /** Human label following 「已归档」, e.g. 「标题」 or 项目「X」的 3 条聊天. */
+  readonly label: string;
 }
 
 interface ArchiveUndoApi {
-  readonly offerArchiveUndo: (target: WorkspaceSessionRef, title: string) => void;
+  /** One call, one undo slot: single rows and bulk archives share the offer. */
+  readonly offerArchiveUndo: (targets: readonly WorkspaceSessionRef[], label: string) => void;
 }
 
 const ArchiveUndoContext = createContext<ArchiveUndoApi | undefined>(undefined);
@@ -42,9 +44,9 @@ export function ArchiveUndoProvider({ children }: { readonly children: ReactNode
     setEntry(undefined);
   }, []);
 
-  const offerArchiveUndo = useCallback((target: WorkspaceSessionRef, title: string) => {
+  const offerArchiveUndo = useCallback((targets: readonly WorkspaceSessionRef[], label: string) => {
     window.clearTimeout(timerRef.current);
-    setEntry({ target, title });
+    setEntry({ targets, label });
     timerRef.current = window.setTimeout(() => setEntry(undefined), UNDO_WINDOW_MS);
   }, []);
 
@@ -55,9 +57,14 @@ export function ArchiveUndoProvider({ children }: { readonly children: ReactNode
     if (!entry || pending) return;
     setPending(true);
     try {
-      if (await actions.setSessionArchived(entry.target, false)) {
+      const restored = await Promise.all(
+        entry.targets.map((target) => actions.setSessionArchived(target, false)),
+      );
+      if (restored.every(Boolean)) {
         actions.showMessage?.("已撤销归档。");
         dismiss();
+      } else {
+        actions.showMessage?.("撤销未完成，请重试或到会话工作库恢复。", "error");
       }
     } finally {
       setPending(false);
@@ -72,7 +79,7 @@ export function ArchiveUndoProvider({ children }: { readonly children: ReactNode
           className={`toast toast--archive-undo ${message ? "toast--raised" : ""}`}
           role="status"
         >
-          <span>{`已归档「${entry.title}」`}</span>
+          <span>{`已归档${entry.label}`}</span>
           <button
             type="button"
             className="toast__action"

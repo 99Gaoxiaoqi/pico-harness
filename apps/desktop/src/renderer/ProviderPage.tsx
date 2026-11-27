@@ -766,7 +766,7 @@ function ProviderEditorDialog({
       <IconButton
         className="dialog__close"
         onClick={() => onOpenChange(false)}
-        label="关闭 Provider 编辑器"
+        label="关闭连接编辑器"
       >
         <X aria-hidden="true" size={17} />
       </IconButton>

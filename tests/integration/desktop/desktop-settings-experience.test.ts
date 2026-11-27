@@ -151,7 +151,7 @@ test("usage settings expose an accessible time filter and CNY cost summaries", a
   assert.match(page, /24 小时/u);
   assert.match(page, /总 Token/u);
   assert.match(page, /¥\$\{value.toLocaleString/u);
-  assert.match(page, /status === "unknown"\) return "未知"/u);
+  assert.match(page, /status === "unknown"\) return costLabels\.unknown/u);
   const summary = sourceSection(page, '<div className="usage-summary"', "{details && (");
   assert.match(
     summary,

@@ -1968,7 +1968,8 @@ export function ConversationPage() {
                                 onClick={() =>
                                   void copyText(legacyStoragePath).then(
                                     () => actions.showMessage?.("已复制旧数据路径。"),
-                                    () => actions.showMessage?.("复制失败，请手动选择路径。"),
+                                    () =>
+                                      actions.showMessage?.("复制失败，请手动选择路径。", "error"),
                                   )
                                 }
                               >
