@@ -128,7 +128,7 @@ async function detectRgExecutable(): Promise<string | undefined> {
 }
 
 /**
- * 在同一次调用可见的环境与实践路径里真实执行一次 rg，确认它既能找到也能启动。
+ * 在同一次调用可见的环境与真实执行路径里运行一次 rg，确认它既能找到也能启动。
  * 进程启动统一走 managedProcessLauncher（danger-full-access 仅做直接 spawn），
  * 不绕过模型可触发进程的收口边界。
  */
