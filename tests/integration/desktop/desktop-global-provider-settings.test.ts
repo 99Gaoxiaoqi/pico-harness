@@ -162,7 +162,7 @@ test("Provider conflicts refresh configuration without replacing actionable serv
   const source = await rendererSource("runtime.ts");
   const start = source.indexOf('label.startsWith("provider-")');
   assert.ok(start >= 0);
-  const handler = source.slice(start, source.indexOf("reportFailure(error);", start));
+  const handler = source.slice(start, source.indexOf("reportFailure(error,", start));
   assert.match(handler, /error\.code === "CONFLICT"/u);
   assert.match(handler, /await loadGlobalProviderConfig\(bridge\)/u);
   assert.match(handler, /setMessage\(error\.message\)/u);
