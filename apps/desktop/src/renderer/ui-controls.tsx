@@ -1,6 +1,6 @@
 import { TextInput, type TextInputProps } from "@astryxdesign/core/TextInput";
 import { TextArea } from "@astryxdesign/core/TextArea";
-import { Selector } from "@astryxdesign/core/Selector";
+import { Selector, type SelectorOptionType } from "@astryxdesign/core/Selector";
 import { Switch } from "@astryxdesign/core/Switch";
 import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
 import type { ComponentProps, CSSProperties } from "react";
@@ -106,13 +106,10 @@ export function TextAreaField({
 
 export interface SelectFieldProps extends FieldBase {
   readonly value: string;
-  readonly options: readonly {
-    readonly value: string;
-    readonly label: string;
-    readonly disabled?: boolean;
-  }[];
+  readonly options: readonly SelectorOptionType[];
   readonly onValueChange: (value: string) => void;
   readonly title?: string | undefined;
+  readonly placeholder?: string | undefined;
 }
 
 export function SelectField({

@@ -12,6 +12,7 @@ import {
   type NavigateFunction,
 } from "react-router-dom";
 import { SessionsPage } from "../../apps/desktop/src/renderer/pages/SessionsPage.tsx";
+import { ArchiveUndoProvider } from "../../apps/desktop/src/renderer/archive-undo.tsx";
 import { UsagePage } from "../../apps/desktop/src/renderer/usage/UsagePage.tsx";
 import { ConversationPage } from "../../apps/desktop/src/renderer/pages/ConversationPage.tsx";
 import { SideChatPanelController } from "../../apps/desktop/src/renderer/workbar-panels/SideChatPanelController.tsx";
@@ -550,7 +551,14 @@ async function mount(side = false, key = crypto.randomUUID()) {
         <RuntimeContext value={runtime}>
           <MemoryRouter key={key} initialEntries={["/session/s1?workspace=%2Ffixture"]}>
             <Routes>
-              <Route path="/sessions" element={<SessionsPage />} />
+              <Route
+                path="/sessions"
+                element={
+                  <ArchiveUndoProvider>
+                    <SessionsPage />
+                  </ArchiveUndoProvider>
+                }
+              />
               <Route path="/settings/usage" element={<UsagePage />} />
               <Route
                 path="/task/new"
@@ -698,11 +706,27 @@ async function command(text: string) {
       "未知命令丢失草稿",
     );
     await type("/resume s");
+    // Electron resolves argument completion over IPC; wait for the async result
+    // instead of assuming one frame is enough on slower runners.
+    let firstResumeOption = "";
+    let allResumeOptions = "";
+    const resumeDeadline = performance.now() + 1000;
+    while (performance.now() < resumeDeadline) {
+      firstResumeOption =
+        document.querySelector('.command-suggestions [role="option"]')?.textContent ?? "";
+      allResumeOptions = [
+        ...document.querySelectorAll<HTMLElement>('.command-suggestions [role="option"]'),
+      ]
+        .map((item) => item.textContent ?? "")
+        .join(" | ");
+      if (firstResumeOption.includes("第二个会话")) break;
+      await act(async () => {
+        await wait();
+      });
+    }
     check(
-      document
-        .querySelector('.command-suggestions [role="option"]')
-        ?.textContent.includes("第二个会话"),
-      "参数补全未显示标题",
+      firstResumeOption.includes("第二个会话"),
+      "参数补全未显示标题: first=" + firstResumeOption + " all=" + allResumeOptions,
     );
     await key("Tab");
     check(editor().textContent.trim() === "/resume s2", "会话补全没使用 ID");

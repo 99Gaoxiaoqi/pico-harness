@@ -97,14 +97,10 @@ export function CapabilityPage({
             <h2>{config.title}</h2>
             <p>{config.detail}</p>
           </div>
-          {kind === "mcp" ? (
+          {kind === "mcp" && (
             <Button disabled={Boolean(busy)} onClick={() => setAddingMcp((visible) => !visible)}>
               <Plus aria-hidden="true" size={16} />
               添加用户级 MCP
-            </Button>
-          ) : (
-            <Button disabled title="Skills v1 仅支持查看">
-              Skills v1 只读
             </Button>
           )}
         </section>
@@ -157,7 +153,7 @@ export function CapabilityPage({
       </section>
       {kind === "skills" && (
         <InlineNotice tone="neutral">
-          Skills v1 仅支持查看来源与有效状态，不在 Desktop 中修改文件。
+          当前版本 Skills 为只读，编辑请修改项目内 SKILLS 文件。
         </InlineNotice>
       )}
     </div>

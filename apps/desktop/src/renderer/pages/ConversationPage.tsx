@@ -111,13 +111,21 @@ import {
 
 const CHOOSE_PROJECT_OPTION_VALUE = "__choose-project__";
 
-const TEMPORARY_PROJECT_OPTION_VALUE = "__temporary-project__";
-
 const PERMISSION_MODE_LABELS = {
   ask: "请求批准",
   auto: "帮我批准",
   "full-access": "完全访问权限",
 } as const;
+
+const REASONING_LEVEL_LABELS: Readonly<Record<string, string>> = {
+  off: "关闭",
+  minimal: "最少",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "更高",
+  max: "最高",
+};
 
 export function NewTaskPage() {
   const { data, actions } = useRuntime();
@@ -197,6 +205,7 @@ export function ConversationPage() {
 
   const [workbar, dispatchWorkbar] = useSessionWorkbar(draftKey);
   const [workbarError, setWorkbarError] = useState<string>();
+  const [copyPathError, setCopyPathError] = useState(false);
   const closingTerminalTabsRef = useRef(new Set<string>());
   const wasWorkbarCollapsedRef = useRef(workbar.collapsed);
   useEffect(() => {
@@ -870,7 +879,8 @@ export function ConversationPage() {
     item: Extract<ConversationItemView, { kind: "userMessage" }>,
   ) => {
     if (item.media?.length || item.text.includes("pico://artifact/")) {
-      actions.showMessage?.("含附件消息暂不支持编辑并重发，请新建消息发送。");
+      quoteIntoMainComposer(item.text);
+      actions.showMessage?.("已把原消息引用到输入框，补充说明后发送。");
       return;
     }
     setEditingUserMessage({ item, previousDraft: draft });
@@ -1061,7 +1071,7 @@ export function ConversationPage() {
           })
           .catch((cause: unknown) => {
             if (sendRouteRef.current !== routeKey) return;
-            const reason = cause instanceof Error ? cause.message : "请稍后重试。";
+            const reason = cause instanceof Error ? cause.message : "请重试。";
             setWorkbarError(`未能关闭“${tab.label}”：${reason}`);
           })
           .finally(() => closingTerminalTabsRef.current.delete(closingKey));
@@ -1178,6 +1188,16 @@ export function ConversationPage() {
         : false,
   });
 
+  const copyWorkspacePath = () => {
+    void copyText(workspacePath).then(
+      () => {
+        setCopyPathError(false);
+        actions.showMessage?.("已复制当前会话的项目路径。");
+      },
+      () => setCopyPathError(true),
+    );
+  };
+
   return (
     <SessionWorkbarLayout
       state={workbar}
@@ -1269,23 +1289,28 @@ export function ConversationPage() {
                   {parentRef ? "子智能体" : session ? "主智能体" : "智能体"}
                 </span>
               </div>
+              {copyPathError && (
+                <p className="conversation-copy-failure" role="alert">
+                  复制失败
+                  <button type="button" onClick={copyWorkspacePath}>
+                    重试
+                  </button>
+                </p>
+              )}
               <div className="conversation-session-header__meta">
                 {preview && <PreviewBadge />}
-                {conversation?.usage && (
+                {conversation?.usage?.totalTokens !== undefined && (
                   <Button
                     type="button"
                     variant="quiet"
                     aria-label="查看 Token 用量总览"
-                    title={`会话累计 Token：${conversation.usage.totalTokens?.toLocaleString("zh-CN") ?? "未知"}`}
+                    title={`会话累计 Token：${conversation.usage.totalTokens.toLocaleString("zh-CN")}`}
                     onClick={() => {
                       setInspectorTab("overview");
                       dispatchWorkbar({ type: "open", tab: createWorkbarToolTab("inspector") });
                     }}
                   >
-                    会话累计 Token{" "}
-                    {conversation.usage.totalTokens === undefined
-                      ? "未知"
-                      : formatCompact(conversation.usage.totalTokens)}
+                    会话累计 Token {formatCompact(conversation.usage.totalTokens)}
                   </Button>
                 )}
                 {activeRun && <StatusPill status={activeRun.status} />}
@@ -1304,12 +1329,9 @@ export function ConversationPage() {
                   <div className="conversation-session-actions" aria-label="会话操作">
                     <ConversationActionsMenu
                       key={conversationKey}
-                      disabledReason={
-                        activeRun
-                          ? "等待当前运行结束后操作"
-                          : busy
-                            ? "正在处理，请稍后操作"
-                            : undefined
+                      disabledReason={busy ? "正在处理，请稍后操作" : undefined}
+                      compactDisabledReason={
+                        activeRun ? "任务运行中，停止后可压缩上下文" : undefined
                       }
                       onReview={() =>
                         navigate(
@@ -1326,13 +1348,7 @@ export function ConversationPage() {
                       }}
                       onCompact={commands.requestCompact}
                       onOpenWorkspace={() => void actions.openWorkspace(workspacePath)}
-                      onCopyWorkspacePath={() =>
-                        void copyText(workspacePath)
-                          .then(() => actions.showMessage?.("已复制当前会话的项目路径。"))
-                          .catch(() =>
-                            actions.showMessage?.("复制路径失败，请检查系统剪贴板权限。"),
-                          )
-                      }
+                      onCopyWorkspacePath={copyWorkspacePath}
                     />
                   </div>
                 )}
@@ -1554,34 +1570,24 @@ export function ConversationPage() {
                             <SelectField
                               name="workspace"
                               label="项目"
-                              value={
-                                workspace?.temporary
-                                  ? TEMPORARY_PROJECT_OPTION_VALUE
-                                  : workspacePath || ""
-                              }
+                              placeholder="无项目"
+                              value={workspace?.temporary ? "" : workspacePath || ""}
                               onValueChange={(nextWorkspacePath) => {
                                 if (nextWorkspacePath === CHOOSE_PROJECT_OPTION_VALUE) {
                                   void chooseProjectFolder();
                                   return;
                                 }
-                                if (nextWorkspacePath === TEMPORARY_PROJECT_OPTION_VALUE) return;
                                 changeNewTaskProject(nextWorkspacePath);
                               }}
                               options={[
-                                { value: "", label: "无项目" },
-                                { value: CHOOSE_PROJECT_OPTION_VALUE, label: "打开项目文件夹…" },
-                                ...(workspace?.temporary
-                                  ? [
-                                      {
-                                        value: TEMPORARY_PROJECT_OPTION_VALUE,
-                                        label: workspaceLabel,
-                                      },
-                                    ]
-                                  : []),
                                 ...projectWorkspaceOptions.map((workspace) => ({
                                   value: workspace.path,
                                   label: workspaceDisplayName(workspace.path, workspace),
                                 })),
+                                ...(projectWorkspaceOptions.length > 0
+                                  ? [{ type: "divider" as const }]
+                                  : []),
+                                { value: CHOOSE_PROJECT_OPTION_VALUE, label: "添加项目…" },
                               ]}
                             />
                           </div>
@@ -1626,10 +1632,10 @@ export function ConversationPage() {
                                       updateNewTaskSettings({ thinkingEffort })
                                     }
                                     options={[
-                                      { value: "", label: "思考：默认" },
+                                      { value: "", label: "默认" },
                                       ...newTaskReasoningLevels.map((level) => ({
                                         value: level,
-                                        label: level,
+                                        label: REASONING_LEVEL_LABELS[level] ?? level,
                                       })),
                                     ]}
                                   />
@@ -1707,10 +1713,10 @@ export function ConversationPage() {
 
                           {conversation.settings.reasoningLevels.length > 0 && (
                             <div className="conversation-context-option">
-                              <span className="conversation-sr-only">Thinking</span>
+                              <span className="conversation-sr-only">思考强度</span>
                               <SelectField
                                 name="thinking-effort"
-                                label="Thinking"
+                                label="思考强度"
                                 value={conversation.settings.thinkingEffort}
                                 disabled={Boolean(activeRun) || Boolean(busy)}
                                 onValueChange={(value) =>
@@ -1720,7 +1726,7 @@ export function ConversationPage() {
                                 }
                                 options={conversation.settings.reasoningLevels.map((level) => ({
                                   value: level,
-                                  label: level,
+                                  label: REASONING_LEVEL_LABELS[level] ?? level,
                                 }))}
                               />
                             </div>

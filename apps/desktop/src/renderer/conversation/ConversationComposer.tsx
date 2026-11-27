@@ -176,9 +176,22 @@ export function ConversationComposer({
   const editableRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [fileRejectionNotice, setFileRejectionNotice] = useState<string>();
+  const fileRejectionTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(fileRejectionTimer.current), []);
   const filesDisabled = disabled || busy || Boolean(filesDisabledReason);
   const receiveFiles = (incoming: FileList | null) => {
-    if (incoming?.length && !filesDisabled) onFilesAdd?.(Array.from(incoming));
+    if (!incoming?.length) return;
+    if (filesDisabled) {
+      setFileRejectionNotice(filesDisabledReason ?? "当前无法添加附件。");
+      window.clearTimeout(fileRejectionTimer.current);
+      fileRejectionTimer.current = window.setTimeout(
+        () => setFileRejectionNotice(undefined),
+        5_000,
+      );
+      return;
+    }
+    onFilesAdd?.(Array.from(incoming));
   };
   useImperativeHandle(
     inputRef,
@@ -356,8 +369,10 @@ export function ConversationComposer({
           ))}
         </ul>
       )}
-      {onFilesAdd && filesDisabledReason && (
-        <p className="conversation-composer__file-notice">{filesDisabledReason}</p>
+      {fileRejectionNotice && (
+        <p className="conversation-composer__file-rejection" role="status">
+          {fileRejectionNotice}
+        </p>
       )}
       <ChatComposer
         className="pico-astryx-composer"
@@ -391,6 +406,7 @@ export function ConversationComposer({
                 className="conversation-composer__attach"
                 type="button"
                 label="添加文件"
+                tooltip={filesDisabled ? (filesDisabledReason ?? "当前无法添加附件") : "添加文件"}
                 icon={<Paperclip aria-hidden="true" />}
                 variant="ghost"
                 size="sm"

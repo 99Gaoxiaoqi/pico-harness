@@ -7,6 +7,7 @@ import { useRef, useState } from "react";
 import type { RuntimeGoal, RuntimeGoalSnapshot } from "@pico/protocol";
 import { TextAreaField, TextField } from "../ui-controls.js";
 import { goalStatusLabel } from "./goal-control.js";
+import { costStatusLabels } from "../view-format.js";
 
 export interface GoalDraft {
   readonly condition: string;
@@ -93,7 +94,7 @@ export function GoalStatusBar({
             {costStatus === "unknown"
               ? "费用未知"
               : costStatus === "included"
-                ? "订阅内含"
+                ? costStatusLabels.included
                 : costStatus === "partial"
                   ? `已知 ¥${(costCNY ?? 0).toFixed(4)}，部分未知`
                   : `¥${(costCNY ?? 0).toFixed(4)}`}

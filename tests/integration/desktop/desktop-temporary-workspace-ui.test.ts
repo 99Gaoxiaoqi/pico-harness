@@ -179,22 +179,16 @@ test("temporary workspace keeps a stable UI label and can switch to a real proje
     /const projectWorkspaceOptions = data\.workspaces\.filter\([\s\S]*?candidate\.temporary !== true/u,
   );
   assert.match(appSource, /projectWorkspaceOptions\.map\(\(workspace\) =>/u);
-  assert.match(
-    appSource,
-    /workspace\?\.temporary\s*\? TEMPORARY_PROJECT_OPTION_VALUE\s*: workspacePath/u,
-  );
+  assert.match(appSource, /placeholder="无项目"/u);
+  assert.match(appSource, /value=\{workspace\?\.temporary \? "" : workspacePath \|\| ""\}/u);
   assert.match(
     appSource,
     /if \(nextWorkspacePath === CHOOSE_PROJECT_OPTION_VALUE\)[\s\S]*?void chooseProjectFolder\(\)/u,
   );
-  assert.match(appSource, /value: TEMPORARY_PROJECT_OPTION_VALUE,\s*label: workspaceLabel/u);
-  assert.match(
-    appSource,
-    /if \(nextWorkspacePath === TEMPORARY_PROJECT_OPTION_VALUE\) return;\s*changeNewTaskProject\(nextWorkspacePath\);/u,
-  );
   assert.match(appSource, /value: workspace\.path,\s*label: workspaceDisplayName/u);
+  assert.match(appSource, /type: "divider"/u);
+  assert.match(appSource, /label: "添加项目…"/u);
   assert.match(appSource, /const chooseProjectFolder = async \(\) =>/u);
-  assert.match(appSource, /label: "打开项目文件夹…"/u);
   assert.match(
     appSource,
     /const changeNewTaskProject = \(path: string\) =>[\s\S]*?navigate\(newSessionHref\(path\)\)/u,

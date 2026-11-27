@@ -176,7 +176,7 @@ export function SideChatWorkbarPanel({
       className="tool-panel tool-panel--side-chat"
       data-active={active || undefined}
       data-child-state={child.state}
-      aria-label="侧边对话"
+      aria-label="侧聊"
     >
       <header className="side-chat__header">
         <div>
@@ -189,7 +189,7 @@ export function SideChatWorkbarPanel({
           </span>
         </div>
         <Button
-          label="关闭侧边对话"
+          label="关闭侧聊"
           isIconOnly
           icon={<X aria-hidden="true" size={15} />}
           className="tool-panel__icon-button"
@@ -260,7 +260,7 @@ export function SideChatWorkbarPanel({
       </div>
 
       {(pendingPrompt || pendingApproval) && (
-        <div className="side-chat__interaction" aria-label="侧边对话待处理交互">
+        <div className="side-chat__interaction" aria-label="侧聊待处理交互">
           {pendingPrompt}
           {pendingApproval}
         </div>

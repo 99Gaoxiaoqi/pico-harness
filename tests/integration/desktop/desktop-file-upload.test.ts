@@ -68,7 +68,7 @@ const selectProject=async label=>{
   await mount('/task/new');
   check(cards().length===0&&editor().textContent==='','source draft consumed');
   await mount(newSessionHref(project));
-  await selectProject('无项目');
+  await selectProject('Chosen folder');
   await selectProject('Existing project');
   check(cards().length===2&&readPersistentDraft('new:'+project)===merged,'round trip does not duplicate files or text');
   await submit();
@@ -80,7 +80,7 @@ const selectProject=async label=>{
   await mount('/task/new');
   const onlyFile=new File(['file only content'],'only.txt');
   await pick(onlyFile);failure='file only upload failed';await submit();
-  await selectProject('打开项目文件夹…');
+  await selectProject('添加项目…');
   check(folderChoices===1&&route===newSessionHref(folder),'folder picker switches project');
   check(cards().length===1&&cards()[0].textContent.includes('file only upload failed')&&editor().textContent==='','file-only draft and error survive folder selection');
   await submit();
@@ -261,7 +261,7 @@ const submit=async()=>{await act(async()=>{form().dispatchEvent(new Event('submi
 );
 
 test(
-  "历史附件链接使用当前会话的打开与另存桥接，并阻止丢失附件的编辑",
+  "历史附件链接使用当前会话的打开与另存桥接，编辑改为引用原文",
   { timeout: 45_000 },
   async () => {
     const result = await runRendererBrowserScenario(`
@@ -276,7 +276,7 @@ const calls=[];
 window.pico={artifacts:{open:async ref=>{calls.push(['open',ref]);return {ok:true,value:undefined};},saveAs:async ref=>{calls.push(['save',ref]);return {ok:true,value:undefined};}}};
 const root=createRoot(document.getElementById('app'));
 const items=[{id:'message:source:user',kind:'userMessage',text:'请阅读附件\\n\\n[report.docx](pico://artifact/document-1)\\n\\n[blocked](pico://artifact/../../secret)'},{id:'boundary',kind:'runBoundary',status:'interrupted'}];
-const render=(scope)=>root.render(<PicoTheme><ConversationTranscript items={items} mediaScope={scope} onEditUserMessage={()=>{throw new Error('attachment edit must be disabled');}}/></PicoTheme>);
+const render=(scope)=>root.render(<PicoTheme><ConversationTranscript items={items} mediaScope={scope} onEditUserMessage={item=>{calls.push(['edit',item.id]);}}/></PicoTheme>);
 (async()=>{
  await act(async()=>render({workspacePath:'/project',sessionId:'session'}));
  const open=[...document.querySelectorAll('button')].find(b=>b.textContent==='report.docx');
@@ -284,8 +284,11 @@ const render=(scope)=>root.render(<PicoTheme><ConversationTranscript items={item
  await act(async()=>open.click());
  await act(async()=>document.querySelector('button[aria-label="另存附件"]').click());
  check(JSON.stringify(calls)===JSON.stringify([['open',{workspacePath:'/project',sessionId:'session',artifactId:'document-1'}],['save',{workspacePath:'/project',sessionId:'session',artifactId:'document-1'}]]),'native operations bound to current transcript scope');
- check(document.querySelector('button[aria-label="编辑并重发"]').disabled,'old attachment edit explicitly disabled');
- check(document.querySelector('button[aria-label="编辑并重发"]').title.includes('含附件'),'disabled edit explains reason');
+ const editButton=document.querySelector('button[aria-label="编辑并重发"]');
+ check(!editButton.disabled,'attachment message stays manageable through quoting');
+ check(editButton.title.includes('引用'),'attachment edit explains the quoting behavior');
+ await act(async()=>editButton.click());
+ check(calls.some(entry=>entry[0]==='edit'&&entry[1]==='message:source:user'),'attachment edit delegates to page-level quote');
  check(![...document.querySelectorAll('button')].some(b=>b.textContent==='blocked'),'path-shaped artifact links stay inert');
  check(document.body.textContent.includes('已停止本地等待；远端服务可能仍在处理。'),'interrupted status explains local stop');
  await act(async()=>render(undefined));

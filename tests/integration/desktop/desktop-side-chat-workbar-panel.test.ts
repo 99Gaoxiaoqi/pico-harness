@@ -141,7 +141,7 @@ test("Side Chat preserves stop and command sending controls together during a Ru
   );
 
   assert.match(markup, /data-active="true"/u);
-  assert.match(markup, /aria-label="侧边对话待处理交互"/u);
+  assert.match(markup, /aria-label="侧聊待处理交互"/u);
   assert.match(markup, /允许修改文件/u);
   assert.match(markup, /Agent 正在运行/u);
   assert.match(markup, />停止</u);

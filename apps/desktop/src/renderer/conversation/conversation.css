@@ -106,6 +106,27 @@
   gap: 8px;
 }
 
+.conversation-copy-failure {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.conversation-copy-failure button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
 .conversation-graph-parent {
   min-width: 0;
   max-width: min(32vw, 320px);
@@ -471,6 +492,7 @@
   min-height: 44px;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 7px 12px;
   animation: motion-rise-in var(--motion-fast) var(--motion-ease);
@@ -573,6 +595,13 @@
 .conversation-queue__notice {
   margin: 0;
   padding: 0 12px 8px;
+  color: var(--conversation-ink-muted);
+  font-size: 11px;
+}
+
+.conversation-queue__item-notice {
+  flex-basis: 100%;
+  margin: 0;
   color: var(--conversation-ink-muted);
   font-size: 11px;
 }

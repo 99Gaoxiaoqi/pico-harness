@@ -97,6 +97,34 @@ const stateLabels: Readonly<Record<ConversationProgressState, string>> = {
   failed: "失败",
 };
 
+const discoveryDepthLabels = { quick: "浅层", balanced: "均衡", deep: "深入" } as const;
+const discoveryPhaseLabels = {
+  forage: "收集中",
+  focus: "聚焦",
+  deepen: "深入",
+  verify: "核对",
+} as const;
+const discoveryStatusLabels = {
+  active: "进行中",
+  interrupted: "已中断",
+  completed: "已完成",
+  cancelled: "已取消",
+} as const;
+const toolResultStatusLabels: Readonly<Record<string, string>> = {
+  succeeded: "成功",
+  failed: "失败",
+  rejected: "已拒绝",
+  cancelled: "已取消",
+  interrupted: "已中断",
+};
+
+function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "大小未知";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function StateIcon({ state }: { readonly state: ConversationProgressState }) {
   if (state === "done") return <CheckCircle2 aria-hidden="true" />;
   if (state === "active") return <LoaderCircle aria-hidden="true" />;
@@ -237,9 +265,8 @@ function UserMessageBubble({
             <button
               className="conversation-message__action"
               type="button"
-              title={hasAttachments ? "含附件消息暂不支持编辑并重发" : "编辑并重发"}
+              title={hasAttachments ? "编辑并重发（附件消息将以引用方式带入）" : "编辑并重发"}
               aria-label="编辑并重发"
-              disabled={hasAttachments}
               onClick={() => onEdit(item)}
             >
               <Pencil aria-hidden="true" />
@@ -700,11 +727,11 @@ function renderDefaultItem(
             <SearchCode aria-hidden="true" />
             <div>
               <span className="conversation-kicker">
-                Explore · {item.depth} · {item.phase}
+                代码探索 · {discoveryDepthLabels[item.depth]} · {discoveryPhaseLabels[item.phase]}
               </span>
               <strong>{item.objective}</strong>
             </div>
-            <span className="conversation-item-state">{item.status}</span>
+            <span className="conversation-item-state">{discoveryStatusLabels[item.status]}</span>
           </header>
           <p className="conversation-execution-meta">
             {item.inspectedFiles} 个文件 · {item.evidenceCount} 条证据 · {item.openQuestions}{" "}
@@ -783,9 +810,8 @@ function renderDefaultItem(
           <div className="conversation-tool-record__body">
             {item.result && (
               <p className="conversation-execution-meta">
-                {item.result.rawSizeBytes} bytes · {item.result.status} ·
-                <code>{item.result.sha256.slice(0, 12)}</code>
-                {item.result.evidence ? " · 旧 Evidence 元数据" : ""}
+                {formatByteSize(item.result.rawSizeBytes)} ·{" "}
+                {toolResultStatusLabels[item.result.status] ?? item.result.status}
               </p>
             )}
             {item.detail && <p className="conversation-execution-detail">{item.detail}</p>}

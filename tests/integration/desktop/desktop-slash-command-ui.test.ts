@@ -118,7 +118,7 @@ for (const engine of ["Chrome", "Electron"] as const) {
         await symlink(
           fileURLToPath(new URL("../../../node_modules", import.meta.url)),
           join(profile, "node_modules"),
-          "dir",
+          process.platform === "win32" ? "junction" : "dir",
         );
         await build({
           entryPoints: [

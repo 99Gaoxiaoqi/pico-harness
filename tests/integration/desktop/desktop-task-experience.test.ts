@@ -73,7 +73,7 @@ const renderPanel=(props)=>root.render(<PicoTheme><MemoryRouter><TaskExperienceP
   candidate={...candidate,sessionId:'session-new',runId:'run-new',review:'approved',contentVersion:1,recordRevision:1,content:'当前内容已变更',enabled:true};
   const reference={reuseId:'reuse-a',workspaceKey:'/project',candidateId:'lesson-1',contentVersion:1,itemId:'memory-real',itemVersion:4,taskId:'task-new',taskVersion:2,sessionId:'session-new',runId:'run-new',referenceHash:'actual-reference-hash',referenceContent:'本次实际引用：全部行均属于数据。',adoption:'unknown',validation:'unknown',excluded:false,sources:[],createdAt:2,updatedAt:2};
   await act(async()=>renderPanel({mode:'conversation',sessionId:'session-new',reuse:[reference]}));
-  check(text().includes('本次实际引用：全部行均属于数据。')&&text().includes('旧引用记录 v1（时序不完整）')&&text().includes('采用：未知')&&text().includes('验证：尚未验证'),'reference shows frozen content and distinct reuse states');
+  check(text().includes('本次实际引用：全部行均属于数据。')&&text().includes('旧引用记录 v1（当时只送达了一部分）')&&text().includes('采用：未知')&&text().includes('验证：尚未验证'),'reference shows frozen content and distinct reuse states');
   check(!document.querySelector('details.task-experience__summary').open,'task result learning summary starts collapsed');
   await act(async()=>document.querySelector('details.task-experience__summary > summary').click());
   await act(async()=>button('本次不适用').click());

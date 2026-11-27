@@ -127,6 +127,7 @@ import {act} from "react";
 import {createRoot} from "react-dom/client";
 import {MemoryRouter, Routes, Route, useLocation} from "react-router-dom";
 import {AppShell} from "./apps/desktop/src/renderer/AppShell.tsx";
+import {ArchiveUndoProvider} from "./apps/desktop/src/renderer/archive-undo.tsx";
 import {RuntimeContext} from "./apps/desktop/src/renderer/runtime-context.tsx";
 import {previewData} from "./apps/desktop/src/renderer/fixture.ts";
 import {PicoTheme} from "./apps/desktop/src/renderer/astryx-provider.tsx";
@@ -157,9 +158,10 @@ const target = document.getElementById("app");
 target.style.height = "100%";
 const writes = [];
 let confirmResult = true;
+let confirmCalls = 0;
 let failArchive = false;
 let failUnregister = false;
-window.confirm = () => confirmResult;
+window.confirm = () => { confirmCalls++; return confirmResult; };
 const runtime = {
   data: scenarioData, preview: false, busy: false, message: "",
   actions: {
@@ -211,7 +213,7 @@ const waitFor = async (predicate, message, timeout = 5000) => {
     await frame();
   }
 };
-const render = () => root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter initialEntries={["/task/new"]}><Routes><Route element={<AppShell/>}><Route path="*" element={<Page/>}/></Route></Routes></MemoryRouter></RuntimeContext></PicoTheme>);
+const render = () => root.render(<PicoTheme><RuntimeContext value={runtime}><MemoryRouter initialEntries={["/task/new"]}><Routes><Route element={<ArchiveUndoProvider><AppShell/></ArchiveUndoProvider>}><Route path="*" element={<Page/>}/></Route></Routes></MemoryRouter></RuntimeContext></PicoTheme>);
 const projectMenu = () => document.querySelector('[role="menu"][aria-label="项目操作 maka-harness"]');
 const projectItem = (name) => [...projectMenu().querySelectorAll('[role="menuitem"]')].find(item => item.textContent.includes(name));
 const clickProjectItem = async (name) => {
@@ -312,10 +314,6 @@ async function scenario() {
   await act(async () => render());
   await click("按项目分组");
   writes.length = 0;
-  confirmResult = false;
-  await clickProjectItem("归档聊天");
-  check(writes.length === 0, "Cancelling project archive makes no changes");
-  confirmResult = true;
   failArchive = true;
   await clickProjectItem("归档聊天");
   check(writes.length === 1 && runtime.data.sessions.filter(session => session.status === "active").length === 3, "Failed archive stops the batch and keeps chats available");
@@ -323,7 +321,10 @@ async function scenario() {
   writes.length = 0;
   const activeLink = [...document.querySelectorAll('.sidebar-task-link')].find(link => link.getAttribute("href").includes(encodeURIComponent(mainPath)));
   await act(async () => activeLink.click());
+  const confirmsBeforeArchive = confirmCalls;
+  confirmResult = false;
   await clickProjectItem("归档聊天");
+  check(confirmCalls === confirmsBeforeArchive, "Archiving chats never asks for confirmation");
   check(JSON.stringify(writes) === JSON.stringify([
     ["archive", {workspacePath: mainPath, sessionId: running.id}, true],
     ["archive", {workspacePath: linkedPath, sessionId: idle.id}, true],
