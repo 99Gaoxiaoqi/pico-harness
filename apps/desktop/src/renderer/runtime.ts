@@ -166,14 +166,25 @@ export function isPreviewMode(): boolean {
   return params.get("demo") === "1" || hashParams.get("demo") === "1";
 }
 
+const UNKNOWN_ERROR_MESSAGE = "Runtime 返回了未知错误。";
+
 function errorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : "Runtime 返回了未知错误。";
+  const raw = error instanceof Error ? error.message : UNKNOWN_ERROR_MESSAGE;
   const code =
     typeof (error as { code?: unknown })?.code === "string"
       ? (error as { code: string }).code
       : undefined;
   return friendlyRuntimeMessage(raw, code);
 }
+
+/**
+ * Actionable fallback for operations whose failure would otherwise surface
+ * opaque runtime text. Host-provided Chinese explanations still win (see
+ * reportFailure); this only replaces technical text.
+ */
+const ACTION_FAILURE_FALLBACKS: Readonly<Record<string, string>> = {
+  "send-message": "发送未完成，任务内容已保留 · 重试",
+};
 
 /**
  * 把常见的技术性运行时错误归一化为可理解的中文提示 + 可操作建议，让普通用户知道
@@ -911,8 +922,12 @@ export function useRuntimeStore(): RuntimeStore {
     [applyReplicaView],
   );
 
-  const reportFailure = useCallback((error: unknown) => {
-    setMessage(errorMessage(error));
+  const reportFailure = useCallback((error: unknown, fallback?: string) => {
+    const message = errorMessage(error);
+    // Keep host-provided Chinese explanations; only replace opaque technical text
+    // with an actionable fallback that says what was preserved and what to do.
+    const technical = !/[\u4e00-\u9fff]/u.test(message) || message === UNKNOWN_ERROR_MESSAGE;
+    setMessage(fallback && technical ? fallback : message);
   }, []);
 
   const loadWorkspaceIndex = useCallback(
@@ -2076,7 +2091,7 @@ export function useRuntimeStore(): RuntimeStore {
           setMessage(error.message);
           return false;
         }
-        reportFailure(error);
+        reportFailure(error, ACTION_FAILURE_FALLBACKS[label]);
         return false;
       } finally {
         setBusy(undefined);
